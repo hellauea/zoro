@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ZORO - Futuristic Cyber Theme with Cyan/Teal accents */
+
+@layer base {
+  :root {
+    --background: 230 25% 5%;
+    --foreground: 180 100% 95%;
+
+    --card: 230 20% 8%;
+    --card-foreground: 180 100% 95%;
+
+    --popover: 230 20% 8%;
+    --popover-foreground: 180 100% 95%;
+
+    --primary: 180 100% 50%;
+    --primary-foreground: 230 25% 5%;
+
+    --secondary: 230 20% 12%;
+    --secondary-foreground: 180 100% 90%;
+
+    --muted: 230 15% 15%;
+    --muted-foreground: 180 30% 60%;
+
+    --accent: 175 80% 40%;
+    --accent-foreground: 180 100% 95%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 180 50% 20%;
+    --input: 230 20% 15%;
+    --ring: 180 100% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom ZORO tokens */
+    --neon-glow: 180 100% 50%;
+    --neon-glow-dim: 180 80% 35%;
+    --glass: 230 20% 10%;
+    --glass-border: 180 40% 25%;
+  }
+
+  .dark {
+    --background: 230 25% 5%;
+    --foreground: 180 100% 95%;
+
+    --card: 230 20% 8%;
+    --card-foreground: 180 100% 95%;
+
+    --popover: 230 20% 8%;
+    --popover-foreground: 180 100% 95%;
+
+    --primary: 180 100% 50%;
+    --primary-foreground: 230 25% 5%;
+
+    --secondary: 230 20% 12%;
+    --secondary-foreground: 180 100% 90%;
+
+    --muted: 230 15% 15%;
+    --muted-foreground: 180 30% 60%;
+
+    --accent: 175 80% 40%;
+    --accent-foreground: 180 100% 95%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 180 50% 20%;
+    --input: 230 20% 15%;
+    --ring: 180 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/60 backdrop-blur-xl border border-glass-border rounded-xl;
+  }
+
+  .neon-text {
+    text-shadow: 0 0 10px hsl(var(--neon-glow) / 0.8),
+                 0 0 20px hsl(var(--neon-glow) / 0.6),
+                 0 0 40px hsl(var(--neon-glow) / 0.4);
+  }
+
+  .neon-box {
+    box-shadow: 0 0 15px hsl(var(--neon-glow) / 0.4),
+                0 0 30px hsl(var(--neon-glow) / 0.2),
+                inset 0 0 15px hsl(var(--neon-glow) / 0.1);
+  }
+
+  .neon-box-intense {
+    box-shadow: 0 0 20px hsl(var(--neon-glow) / 0.6),
+                0 0 40px hsl(var(--neon-glow) / 0.4),
+                0 0 60px hsl(var(--neon-glow) / 0.2),
+                inset 0 0 20px hsl(var(--neon-glow) / 0.15);
+  }
+}
+
+/* Subtle grid background */
+.cyber-grid {
+  background-image: 
+    linear-gradient(hsl(var(--neon-glow) / 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--neon-glow) / 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+}

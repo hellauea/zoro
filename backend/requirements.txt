@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+groq
+requests
+python-dotenv
+pydantic
+duckduckgo-search
+markitdown
+python-multipart
