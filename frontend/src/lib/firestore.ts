@@ -9,7 +9,8 @@ import {
   orderBy,
   serverTimestamp,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { db, storage } from "./firebase";
 
 // ─── Types (matching Index.tsx) ───────────────────────────────────────────────
 
@@ -18,6 +19,7 @@ type Message = {
   role: "user" | "zoro";
   text: string;
   image?: string;
+  document?: { name: string; url: string };
   timestamp: Date;
   pinned?: boolean;
 };
@@ -49,6 +51,7 @@ export async function saveChat(userId: string, chat: Chat) {
         role: m.role,
         text: m.text,
         image: m.image || null,
+        document: m.document || null,
         timestamp: m.timestamp.toISOString(),
         pinned: m.pinned || false,
       })),
@@ -73,6 +76,7 @@ export async function loadChats(userId: string): Promise<Chat[]> {
           role: m.role,
           text: m.text,
           image: m.image || undefined,
+          document: m.document || undefined,
           timestamp: new Date(m.timestamp),
           pinned: m.pinned || false,
         })),
@@ -86,6 +90,12 @@ export async function deleteChat(userId: string, chatId: string) {
     const ref = doc(db, "users", userId, "chats", chatId);
     await deleteDoc(ref);
   } catch { /* silently ignore */ }
+}
+
+export async function uploadDocument(userId: string, file: File): Promise<string> {
+  const fileRef = ref(storage, `users/${userId}/documents/${Date.now()}_${file.name}`);
+  await uploadBytes(fileRef, file);
+  return await getDownloadURL(fileRef);
 }
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
