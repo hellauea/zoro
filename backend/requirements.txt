@@ -7,3 +7,4 @@ pydantic
 duckduckgo-search
 markitdown
 python-multipart
+httpx
