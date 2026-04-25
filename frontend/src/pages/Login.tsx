@@ -23,6 +23,7 @@ export default function Login() {
         await signInWithEmail(email, password);
       }
     } catch (err: any) {
+      console.error("Email auth error:", err);
       const code = err?.code || "";
       if (code === "auth/user-not-found") setError("No account with that email");
       else if (code === "auth/wrong-password") setError("Wrong password");
@@ -30,7 +31,7 @@ export default function Login() {
       else if (code === "auth/email-already-in-use") setError("Email already in use");
       else if (code === "auth/weak-password") setError("Password must be 6+ characters");
       else if (code === "auth/invalid-email") setError("Invalid email address");
-      else setError("Something went wrong. Try again.");
+      else setError(err?.message || "Something went wrong. Try again.");
     }
     setLoading(false);
   };
@@ -41,8 +42,9 @@ export default function Login() {
     try {
       await signInWithGoogle();
     } catch (err: any) {
+      console.error("Google auth error:", err);
       if (err?.code !== "auth/popup-closed-by-user") {
-        setError("Google sign-in failed. Try again.");
+        setError(err?.message || "Google sign-in failed. Try again.");
       }
     }
     setLoading(false);
