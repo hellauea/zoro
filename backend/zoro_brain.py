@@ -20,9 +20,11 @@ _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 load_dotenv(dotenv_path=_env_path, override=True)
 
 # Initialize models
-gem_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+gem_key = (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
 if gem_key:
-    print(f"DEBUG: Gemini/Google key detected (len={len(gem_key)})")
+    # Log masked key to verify it's being read correctly
+    masked = f"{gem_key[:6]}...{gem_key[-4:]}" if len(gem_key) > 10 else "too short"
+    print(f"DEBUG: Gemini/Google key detected: {masked} (len={len(gem_key)})")
     genai.configure(api_key=gem_key)
 else:
     print("WARNING: No Gemini/Google API key found!")
