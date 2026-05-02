@@ -98,10 +98,26 @@ async function speakText(text: string, onEnd?: () => void) {
 
 // ─── Markdown ─────────────────────────────────────────────────────────────────
 
-function renderMd(text: string) {
+function renderMd(text: string, onPreview?: (code: string) => void) {
   return text.replace(/\[System:[^\]]*\]/g, "").trim()
     .replace(/https:\/\/image\.pollinations\.ai\/prompt\/[^\s)]+/g, "")
-    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_: string, __: string, c: string) => `<pre class="z-code"><code>${c.trim().replace(/&/g, "&amp;").replace(/</g, "&lt;")}</code></pre>`)
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_: string, lang: string, c: string) => {
+      const isWeb = ["html", "css", "js", "javascript"].includes(lang.toLowerCase());
+      const clean = c.trim().replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      return `
+        <div class="z-code-block" data-lang="${lang || 'code'}">
+          <div class="z-code-header">
+            <div class="z-code-dots"><span></span><span></span><span></span></div>
+            <span class="z-code-lang">${lang || 'code'}</span>
+            <div class="z-code-actions">
+              ${isWeb ? `<button class="z-code-btn z-preview-btn" data-code="${encodeURIComponent(c.trim())}">${Ico.sparkle} Preview</button>` : ""}
+              <button class="z-code-btn z-copy-btn" data-code="${encodeURIComponent(c.trim())}">${Ico.copy} Copy</button>
+            </div>
+          </div>
+          <pre class="z-code"><code>${clean}</code></pre>
+        </div>
+      `;
+    })
     .replace(/`([^`]+)`/g, "<code class='z-ic'>$1</code>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
@@ -231,7 +247,7 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }
           {isZ
             ? msg.text === ""
               ? <div className="typing"><span /><span /><span /></div>
-              : <div dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }} />
+              : <div className="z-md" dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }} />
             : <span>{msg.text}</span>}
         </div>
         <div className="bmeta">
@@ -591,6 +607,7 @@ export default function Index() {
   const [showMem, setShowMem] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [previewCode, setPreviewCode] = useState<string | null>(null);
   const [isTempChat, setIsTempChat] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
@@ -689,6 +706,27 @@ export default function Index() {
       }
     };
     window.addEventListener("paste", fn); return () => window.removeEventListener("paste", fn);
+  }, []);
+
+  // Event delegation for code block buttons
+  useEffect(() => {
+    const handle = (e: MouseEvent) => {
+      const btn = (e.target as HTMLElement).closest(".z-code-btn");
+      if (!btn) return;
+      const code = decodeURIComponent(btn.getAttribute("data-code") || "");
+      if (btn.classList.contains("z-copy-btn")) {
+        navigator.clipboard.writeText(code).then(() => {
+          const original = btn.innerHTML;
+          btn.innerHTML = `${Ico.check} Copied`;
+          btn.classList.add("z-btn-success");
+          setTimeout(() => { btn.innerHTML = original; btn.classList.remove("z-btn-success"); }, 2000);
+        });
+      } else if (btn.classList.contains("z-preview-btn")) {
+        setPreviewCode(code);
+      }
+    };
+    document.addEventListener("click", handle);
+    return () => document.removeEventListener("click", handle);
   }, []);
 
   const newChat = () => {
@@ -878,6 +916,23 @@ export default function Index() {
               <Sidebar chats={chats} activeChatId={activeChatId}
                 onLoad={loadChat} onDelete={delChat} onNew={newChat}
                 onClose={() => setSidebarOpen(false)} user={user} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {previewCode && (
+            <motion.div className="modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onMouseDown={e => { if (e.target === e.currentTarget) setPreviewCode(null); }}>
+              <motion.div className="preview-modal" initial={{ scale: 0.9, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.9, opacity: 0, y: 20 }}>
+                <div className="preview-hd">
+                  <div className="preview-title">{Ico.sparkle} Live Preview</div>
+                  <div className="preview-acts">
+                    <button className="preview-close" onClick={() => setPreviewCode(null)}>{Ico.x(14)}</button>
+                  </div>
+                </div>
+                <iframe srcDoc={previewCode} title="preview" className="preview-frame" sandbox="allow-scripts" />
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -1828,4 +1883,60 @@ body {
 .dark .img-btn { background: rgba(28,25,22,.92); color: var(--text); }
 .dark .welcome-heading { color: var(--text); }
 .dark .hdr-avatar { border-color: var(--border); }
-`;
+
+/* ── Code Blocks ────────────────────────────────────────────────────────────── */
+.z-md { line-height: 1.6; }
+.z-code-block {
+  margin: 16px 0; background: #0d0d0d; border-radius: 12px; overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+.z-code-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.z-code-dots { display: flex; gap: 6px; }
+.z-code-dots span { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,0.15); }
+.z-code-lang { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(255,255,255,0.4); font-weight: 600; }
+.z-code-actions { display: flex; gap: 8px; }
+.z-code-btn {
+  display: flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: rgba(255,255,255,0.7);
+  font-size: 11px; font-weight: 600; padding: 4px 10px; cursor: pointer; transition: all 0.14s;
+  font-family: var(--font);
+}
+.z-code-btn:hover { background: rgba(255,255,255,0.15); color: #fff; }
+.z-btn-success { background: #1e3a1e !important; color: #4caf50 !important; border-color: #4caf50 !important; }
+
+.z-code {
+  padding: 16px; overflow-x: auto; font-family: var(--mono); font-size: 13px;
+  color: #e6e6e6; line-height: 1.5; background: transparent;
+}
+.z-code code { font-family: inherit; }
+.z-ic { background: var(--bg2); color: var(--accent); padding: 2px 5px; border-radius: 4px; font-family: var(--mono); font-size: 0.9em; }
+
+/* ── Preview Modal ──────────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+  z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.preview-modal {
+  width: 100%; max-width: 1000px; height: 85vh; background: #fff; border-radius: 24px;
+  overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 30px 60px rgba(0,0,0,0.4);
+}
+.preview-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px; background: #f8f9fa; border-bottom: 1px solid #eee;
+}
+.preview-title { font-weight: 700; color: #1a1a1a; display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.preview-close {
+  width: 32px; height: 32px; border-radius: 50%; border: none; background: #eee;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s;
+}
+.preview-close:hover { background: #e0e0e0; }
+.preview-frame { flex: 1; border: none; background: #fff; width: 100%; }
+
+@media (max-width: 600px) {
+  .preview-modal { height: 95vh; border-radius: 16px; }
+  .modal-overlay { padding: 10px; }
+}
