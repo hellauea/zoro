@@ -753,78 +753,77 @@ export default function Index() {
     const activeMemory = isTempChat ? [] : memory;
 
     try {
-      if (userMsg.image) {
-        const b64 = userMsg.image.split(",")[1];
-        const mime = (userMsg.image.match(/^data:([^;]+);/) || [])[1] || "image/jpeg";
-        const res = await fetch(`${API}/image`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: txt || "what's in this image?", image_base64: b64, image_mime: mime, history, memory: activeMemory }),
-        });
-        const data = await res.json();
-        const clean = data.response.replace(/\[System:[^\]]*\]/g, "").trim();
-        const msg: Message = { id: makeId(), role: "zoro", text: clean, timestamp: new Date() };
-        setMessages(p => [...p, msg]);
-        if (settings.soundEnabled) playDone();
-        if (settings.ttsEnabled) { setSpeakingId(msg.id); speakText(clean, () => setSpeakingId(null)); }
-      } else {
-        const sid = makeId();
-        setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
-        let finalTxt = txt;
-        
-        if (doc) {
-          try {
-            const fd = new FormData();
-            fd.append("file", doc.file, doc.name);
-            const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd });
-            if (extRes.ok) {
-               const extData = await extRes.json();
-               finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim();
-            } else {
-               finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
-            }
-          } catch (e) { 
-            console.error("Extraction error:", e);
-            finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); 
+      const sid = makeId();
+      setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
+      
+      let finalTxt = txt;
+      if (doc) {
+        try {
+          const fd = new FormData();
+          fd.append("file", doc.file, doc.name);
+          const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd });
+          if (extRes.ok) {
+             const extData = await extRes.json();
+             finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim();
+          } else {
+             finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
           }
+        } catch (e) { 
+          console.error("Extraction error:", e);
+          finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); 
         }
-        
-        const res = await fetch(`${API}/stream`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: finalTxt, history, memory: activeMemory }),
-        });
-        
-        if (!res.ok) throw new Error("Stream failed");
-        
-        const reader = res.body!.getReader(); const dec = new TextDecoder();
-        let buf = "", full = "";
-        while (true) {
-          const { done, value } = await reader.read(); if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const p = JSON.parse(line.slice(6));
-              if (p.token) { 
-                full += p.token; 
-                const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); 
-                setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); 
+      }
+
+      // Handle image if present
+      let image_base64 = undefined;
+      let image_mime = "image/jpeg";
+      if (userMsg.image) {
+        image_base64 = userMsg.image.split(",")[1];
+        image_mime = (userMsg.image.match(/^data:([^;]+);/) || [])[1] || "image/jpeg";
+      }
+
+      const res = await fetch(`${API}/stream`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          text: finalTxt, 
+          image_base64, 
+          image_mime, 
+          history, 
+          memory: activeMemory 
+        }),
+      });
+      
+      if (!res.ok) throw new Error("Stream failed");
+      
+      const reader = res.body!.getReader(); const dec = new TextDecoder();
+      let buf = "", full = "";
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const p = JSON.parse(line.slice(6));
+            if (p.token) { 
+              full += p.token; 
+              const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); 
+              setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); 
+            }
+            if (p.done) {
+              if (settings.soundEnabled) playDone();
+              if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
+              if (!isTempChat && p.new_memory && p.new_memory.length > 0) {
+                setMemory(prev => {
+                  const merged = [...prev];
+                  for (const item of p.new_memory) {
+                    if (item && !merged.includes(item)) merged.push(item);
+                  }
+                  return merged;
+                });
               }
-              if (p.done) {
-                if (settings.soundEnabled) playDone();
-                if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
-                if (!isTempChat && p.new_memory && p.new_memory.length > 0) {
-                  setMemory(prev => {
-                    const merged = [...prev];
-                    for (const item of p.new_memory) {
-                      if (item && !merged.includes(item)) merged.push(item);
-                    }
-                    return merged;
-                  });
-                }
-              }
-            } catch { }
-          }
+            }
+          } catch { }
         }
       }
     } catch (e) {

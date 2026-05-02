@@ -122,7 +122,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ttsEnabled: false,
   soundEnabled: true,
   storeHistory: true,
-  darkMode: false,
+  darkMode: true,
 };
 
 export async function saveUserSettings(userId: string, settings: Settings) {

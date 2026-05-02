@@ -108,6 +108,8 @@ class HistoryMessage(BaseModel):
 
 class CommandRequest(BaseModel):
     text: str
+    image_base64: Optional[str] = None
+    image_mime: Optional[str] = "image/jpeg"
     history: Optional[list[HistoryMessage]] = []
     memory: Optional[list[str]] = []
 
@@ -218,7 +220,33 @@ async def tts(req: TTSRequest):
 def stream_command(req: CommandRequest):
     history = req.history or []
     memory  = req.memory or []
-    messages = build_messages(history, req.text, memory)
+    
+    # Decide which model to use
+    use_vision = bool(req.image_base64)
+    model = VISION_MODEL if use_vision else MODEL_NAME
+    
+    # Build messages
+    system = SYSTEM_PROMPT
+    if memory:
+        memory_block = "\n\n## THINGS YOU KNOW ABOUT THE USER\n"
+        memory_block += "\n".join(f"- {m}" for m in memory)
+        system = system + memory_block
+
+    messages = [{"role": "system", "content": system}]
+    for msg in history[:-1]:
+        role = "user" if msg.role == "user" else "assistant"
+        messages.append({"role": role, "content": msg.text})
+    
+    if use_vision:
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{req.image_mime};base64,{req.image_base64}"}},
+                {"type": "text", "text": req.text or "what's in this image?"}
+            ]
+        })
+    else:
+        messages.append({"role": "user", "content": req.text})
 
     def generate():
         try:
@@ -240,18 +268,18 @@ def stream_command(req: CommandRequest):
             ]
 
             stream = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model,
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
-                max_tokens=512,
-                temperature=0.85,
+                max_tokens=1024 if use_vision else 512,
+                temperature=0.8,
                 stream=True,
             )
             
             tool_call_chunks = []
             is_tool_call = False
-            full_response = ""  # accumulate for memory extraction
+            full_response = ""
 
             for chunk in stream:
                 delta = chunk.choices[0].delta
@@ -265,7 +293,8 @@ def stream_command(req: CommandRequest):
                             "function": { "name": tc_delta.function.name, "arguments": tc_delta.function.arguments or "" }
                         })
                     else:
-                        tool_call_chunks[0]["function"]["arguments"] += (tc_delta.function.arguments or "")
+                        if tc_delta.function.arguments:
+                            tool_call_chunks[0]["function"]["arguments"] += tc_delta.function.arguments
                 elif delta.content and not is_tool_call:
                     token = delta.content
                     full_response += token
@@ -273,42 +302,45 @@ def stream_command(req: CommandRequest):
                     
             if is_tool_call:
                 tc = tool_call_chunks[0]
-                q = json.loads(tc["function"]["arguments"]).get("query", "")
-                
-                yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
-                
-                from duckduckgo_search import DDGS
                 try:
-                    with DDGS() as ddgs:
-                        results = [r for r in ddgs.text(q, max_results=3)]
-                except Exception as e:
-                    results = [{"error": str(e)}]
-                    
-                messages.append({
-                    "role": "assistant",
-                    "tool_calls": tool_call_chunks
-                })
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "name": "web_search",
-                    "content": json.dumps(results)
-                })
+                    args = json.loads(tc["function"]["arguments"])
+                    q = args.get("query", "")
+                except:
+                    q = ""
                 
-                stream2 = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    max_tokens=512,
-                    temperature=0.85,
-                    stream=True,
-                )
-                for chunk in stream2:
-                    token = chunk.choices[0].delta.content or ""
-                    if token:
-                        full_response += token
-                        yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                if q:
+                    yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
+                    from duckduckgo_search import DDGS
+                    try:
+                        with DDGS() as ddgs:
+                            results = [r for r in ddgs.text(q, max_results=3)]
+                    except Exception as e:
+                        results = [{"error": str(e)}]
                         
-            # Extract memory from this exchange
+                    messages.append({
+                        "role": "assistant",
+                        "tool_calls": tool_call_chunks
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": "web_search",
+                        "content": json.dumps(results)
+                    })
+                    
+                    stream2 = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=1024 if use_vision else 512,
+                        temperature=0.8,
+                        stream=True,
+                    )
+                    for chunk in stream2:
+                        token = chunk.choices[0].delta.content or ""
+                        if token:
+                            full_response += token
+                            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                        
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
         except Exception as e:
@@ -324,7 +356,7 @@ def stream_command(req: CommandRequest):
 
 # ── Image endpoint ──────────────────────────────────────────────────────────
 
-VISION_MODEL = "llama-3.2-11b-vision-preview"
+VISION_MODEL = "llama-3.2-90b-vision-preview"
 
 @app.post("/image", response_model=CommandResponse)
 def image_command(req: ImageRequest):
