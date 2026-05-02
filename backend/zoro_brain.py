@@ -108,8 +108,6 @@ class HistoryMessage(BaseModel):
 
 class CommandRequest(BaseModel):
     text: str
-    image_base64: Optional[str] = None
-    image_mime: Optional[str] = "image/jpeg"
     history: Optional[list[HistoryMessage]] = []
     memory: Optional[list[str]] = []
 
@@ -214,82 +212,43 @@ async def tts(req: TTSRequest):
         )
 
 
-# ── Streaming endpoint ──────────────────────────────────────────────────────
+# ── Streaming endpoint (text only) ──────────────────────────────────────────
 
 @app.post("/stream")
 def stream_command(req: CommandRequest):
     history = req.history or []
     memory  = req.memory or []
-    
-    # Decide which model to use
-    use_vision = bool(req.image_base64 and len(req.image_base64) > 10)
-    model = "llama-3.2-11b-vision-preview" if use_vision else MODEL_NAME
-    
-    # Build messages
-    system = SYSTEM_PROMPT
-    if memory:
-        memory_block = "\n\n## THINGS YOU KNOW ABOUT THE USER\n"
-        memory_block += "\n".join(f"- {m}" for m in memory)
-        system = system + memory_block
-    
-    if use_vision:
-        system += "\n\n(Note: The user has attached an image to this message. Please analyze it carefully to answer their question.)"
-
-    messages = [{"role": "system", "content": system}]
-    for msg in history[:-1]:
-        role = "user" if msg.role == "user" else "assistant"
-        messages.append({"role": role, "content": msg.text})
-    
-    if use_vision:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": req.text or "what do you see in this image?"},
-                {"type": "image_url", "image_url": {"url": f"data:{req.image_mime};base64,{req.image_base64}"}}
-            ]
-        })
-    else:
-        messages.append({"role": "user", "content": req.text})
+    messages = build_messages(history, req.text, memory)
 
     def generate():
         try:
-            if use_vision:
-                # Vision models on Groq do NOT support tools/function calling
-                print(f"VISION MODE: model={model}, text='{req.text[:80]}', image_b64_len={len(req.image_base64) if req.image_base64 else 0}")
-                stream = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=1024,
-                    temperature=0.7,
-                    stream=True,
-                )
-            else:
-                tools = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "web_search",
-                            "description": "Search the web for real-time information",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {"type": "string", "description": "The search query"}
-                                },
-                                "required": ["query"],
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search the web for real-time information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "The search query"}
                             },
-                        }
+                            "required": ["query"],
+                        },
                     }
-                ]
-                stream = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    max_tokens=512,
-                    temperature=0.8,
-                    stream=True,
-                )
-            
+                }
+            ]
+
+            stream = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=512,
+                temperature=0.85,
+                stream=True,
+            )
+
             tool_call_chunks = []
             is_tool_call = False
             full_response = ""
@@ -312,15 +271,14 @@ def stream_command(req: CommandRequest):
                     token = delta.content
                     full_response += token
                     yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                    
+
             if is_tool_call:
                 tc = tool_call_chunks[0]
                 try:
-                    args = json.loads(tc["function"]["arguments"])
-                    q = args.get("query", "")
+                    q = json.loads(tc["function"]["arguments"]).get("query", "")
                 except:
                     q = ""
-                
+
                 if q:
                     yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
                     from duckduckgo_search import DDGS
@@ -329,31 +287,20 @@ def stream_command(req: CommandRequest):
                             results = [r for r in ddgs.text(q, max_results=3)]
                     except Exception as e:
                         results = [{"error": str(e)}]
-                        
-                    messages.append({
-                        "role": "assistant",
-                        "tool_calls": tool_call_chunks
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": "web_search",
-                        "content": json.dumps(results)
-                    })
-                    
+
+                    messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
+
                     stream2 = client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        max_tokens=1024 if use_vision else 512,
-                        temperature=0.8,
-                        stream=True,
+                        model=MODEL_NAME, messages=messages,
+                        max_tokens=512, temperature=0.85, stream=True,
                     )
                     for chunk in stream2:
                         token = chunk.choices[0].delta.content or ""
                         if token:
                             full_response += token
                             yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                        
+
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
         except Exception as e:
@@ -367,44 +314,69 @@ def stream_command(req: CommandRequest):
     )
 
 
-# ── Image endpoint ──────────────────────────────────────────────────────────
+# ── Vision endpoint (image + text, streaming) ──────────────────────────────
 
-VISION_MODEL = "llama-3.2-90b-vision-preview"
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 
-@app.post("/image", response_model=CommandResponse)
-def image_command(req: ImageRequest):
-    try:
-        memory = req.memory or []
-        system = SYSTEM_PROMPT
-        if memory:
-            memory_block = "\n\n## THINGS YOU KNOW ABOUT THE USER\n"
-            memory_block += "\n".join(f"- {m}" for m in memory)
-            system = system + memory_block
+@app.post("/vision")
+def vision_stream(req: ImageRequest):
+    """
+    Dedicated streaming endpoint for image analysis.
+    Accepts base64 image + text prompt, streams the response back via SSE.
+    Uses a vision-capable model — NO tools/function calling.
+    """
+    print(f"VISION REQUEST: text='{req.text[:80]}', mime={req.image_mime}, b64_len={len(req.image_base64)}")
 
-        messages = [{"role": "system", "content": system}]
-        for msg in (req.history or [])[:-1]:
-            role = "user" if msg.role == "user" else "assistant"
-            messages.append({"role": role, "content": msg.text})
+    memory = req.memory or []
+    system = SYSTEM_PROMPT
+    if memory:
+        memory_block = "\n\n## THINGS YOU KNOW ABOUT THE USER\n"
+        memory_block += "\n".join(f"- {m}" for m in memory)
+        system += memory_block
 
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{req.image_mime};base64,{req.image_base64}"}},
-                {"type": "text", "text": req.text or "what's in this image?"}
-            ]
-        })
+    messages = [{"role": "system", "content": system}]
+    for msg in (req.history or [])[:-1]:
+        role = "user" if msg.role == "user" else "assistant"
+        messages.append({"role": role, "content": msg.text})
 
-        chat_completion = client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=messages,
-            max_tokens=512,
-            temperature=0.85,
-        )
-        reply = chat_completion.choices[0].message.content.strip()
-        return CommandResponse(response=reply)
-    except Exception as e:
-        print("IMAGE ERROR:", e)
-        return CommandResponse(response="hm, couldn't read the image. try again?")
+    # Build the multimodal user message
+    data_url = f"data:{req.image_mime};base64,{req.image_base64}"
+    user_text = req.text.strip() if req.text.strip() else "describe what you see in this image"
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    })
+
+    def generate():
+        full_response = ""
+        try:
+            stream = client.chat.completions.create(
+                model=VISION_MODEL,
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.7,
+                stream=True,
+            )
+            for chunk in stream:
+                token = chunk.choices[0].delta.content or ""
+                if token:
+                    full_response += token
+                    yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+
+            new_mem = extract_memory(req.text, full_response, memory)
+            yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
+        except Exception as e:
+            print(f"VISION ERROR: {e}")
+            yield f"data: {json.dumps({'token': f'couldn\'t process the image: {e}', 'done': True})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── File Extract endpoint ───────────────────────────────────────────────────

@@ -715,130 +715,108 @@ export default function Index() {
     const txt = (override ?? input).trim();
     if ((!txt && !pendingImg && !pendingDoc) || loading) return;
 
-    // Start loading and clear input immediately for responsiveness
     setLoading(true);
-    stopSpeaking(); 
+    stopSpeaking();
     setSpeakingId(null);
-    
+
+    // Snapshot and clear immediately
     const doc = pendingDoc;
     const img = pendingImg;
-    
-    // Clear inputs immediately
     setInput("");
     setPendingImg(null);
     setPendingDoc(null);
 
+    // Upload doc to Firebase if needed
     let docUrl = "";
     if (doc && uid) {
-      try { 
-        docUrl = await uploadDocument(uid, doc.file); 
-      } catch (e) { 
-        console.error("Upload failed:", e); 
-      }
+      try { docUrl = await uploadDocument(uid, doc.file); } catch (e) { console.error("Upload failed:", e); }
     }
 
-    const userMsg: Message = { 
-      id: makeId(), 
-      role: "user", 
-      text: txt || (doc ? doc.name : ""), 
-      image: img ?? undefined, 
-      document: docUrl ? { name: doc.name, url: docUrl } : undefined, 
-      timestamp: new Date() 
+    // Build user message for display
+    const userMsg: Message = {
+      id: makeId(), role: "user",
+      text: txt || (doc ? doc.name : ""),
+      image: img ?? undefined,
+      document: docUrl ? { name: doc!.name, url: docUrl } : undefined,
+      timestamp: new Date(),
     };
-
     const next = [...messages, userMsg];
     setMessages(next);
-    
+
     const history = next.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
     const activeMemory = isTempChat ? [] : memory;
+    const sid = makeId();
+    setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
 
     try {
-      const sid = makeId();
-      setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
-      
-      let finalTxt = txt;
-      if (doc) {
-        try {
-          const fd = new FormData();
-          fd.append("file", doc.file, doc.name);
-          const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd });
-          if (extRes.ok) {
-             const extData = await extRes.json();
-             finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim();
-          } else {
-             finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
+      let res: Response;
+
+      if (img) {
+        // ─── IMAGE PATH: compress → send to /vision ───
+        const b64 = await compressImage(img);
+        console.log("[VISION] Sending image, b64 length:", b64.length);
+        res = await fetch(`${API}/vision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: txt || "describe what you see in this image",
+            image_base64: b64,
+            image_mime: "image/jpeg",
+            history,
+            memory: activeMemory,
+          }),
+        });
+      } else {
+        // ─── TEXT PATH: optionally extract doc → send to /stream ───
+        let finalTxt = txt;
+        if (doc) {
+          try {
+            const fd = new FormData();
+            fd.append("file", doc.file, doc.name);
+            const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd });
+            if (extRes.ok) {
+              const extData = await extRes.json();
+              finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim();
+            } else {
+              finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
+            }
+          } catch (e) {
+            console.error("Extraction error:", e);
+            finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
           }
-        } catch (e) { 
-          console.error("Extraction error:", e);
-          finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); 
         }
+        res = await fetch(`${API}/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: finalTxt, history, memory: activeMemory }),
+        });
       }
 
-      // Handle image if present — compress to avoid huge payloads
-      let image_base64: string | null = null;
-      let image_mime = "image/jpeg";
-      if (userMsg.image) {
-        try {
-          // Compress image using canvas to max 1024px
-          const compressed = await new Promise<string>((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-              const MAX = 1024;
-              let w = img.width, h = img.height;
-              if (w > MAX || h > MAX) {
-                if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
-                else { w = Math.round(w * MAX / h); h = MAX; }
-              }
-              const c = document.createElement("canvas");
-              c.width = w; c.height = h;
-              c.getContext("2d")!.drawImage(img, 0, 0, w, h);
-              resolve(c.toDataURL("image/jpeg", 0.85));
-            };
-            img.onerror = () => resolve(userMsg.image!); // fallback to original
-            img.src = userMsg.image!;
-          });
-          image_base64 = compressed.split(",")[1];
-          image_mime = "image/jpeg";
-          console.log("Image compressed, base64 length:", image_base64.length);
-        } catch {
-          // Fallback: use raw data
-          image_base64 = userMsg.image.split(",")[1];
-          image_mime = (userMsg.image.match(/^data:([^;]+);/) || [])[1] || "image/jpeg";
-        }
-      }
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
 
-      const res = await fetch(`${API}/stream`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          text: finalTxt || "what do you see in this image?", 
-          image_base64, 
-          image_mime, 
-          history, 
-          memory: activeMemory 
-        }),
-      });
-      
-      if (!res.ok) throw new Error("Stream failed");
-      
-      const reader = res.body!.getReader(); const dec = new TextDecoder();
+      // ─── Shared SSE reader for both endpoints ───
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
       let buf = "", full = "";
       while (true) {
-        const { done, value } = await reader.read(); if (done) break;
+        const { done, value } = await reader.read();
+        if (done) break;
         buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
+        const lines = buf.split("\n\n");
+        buf = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           try {
             const p = JSON.parse(line.slice(6));
-            if (p.token) { 
-              full += p.token; 
-              const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); 
-              setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); 
+            if (p.token) {
+              full += p.token;
+              const c = full.replace(/\[System:[^\]]*\]/g, "").trim();
+              setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m));
             }
             if (p.done) {
               if (settings.soundEnabled) playDone();
               if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
-              if (!isTempChat && p.new_memory && p.new_memory.length > 0) {
+              if (!isTempChat && p.new_memory?.length > 0) {
                 setMemory(prev => {
                   const merged = [...prev];
                   for (const item of p.new_memory) {
@@ -855,9 +833,36 @@ export default function Index() {
       console.error("Send error:", e);
       setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
     }
-    setLoading(false); 
+    setLoading(false);
     setTimeout(() => taRef.current?.focus(), 0);
   };
+
+  /** Compress an image data-URL down to max 1024px JPEG via canvas */
+  async function compressImage(dataUrl: string): Promise<string> {
+    return new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => {
+        const MAX = 1024;
+        let w = image.width, h = image.height;
+        if (w > MAX || h > MAX) {
+          if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+          else       { w = Math.round(w * MAX / h); h = MAX; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d")!.drawImage(image, 0, 0, w, h);
+        const jpeg = canvas.toDataURL("image/jpeg", 0.8);
+        resolve(jpeg.split(",")[1]); // return only the base64 part
+      };
+      image.onerror = () => {
+        // Fallback: strip the data URL prefix and return raw base64
+        const idx = dataUrl.indexOf(",");
+        resolve(idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl);
+      };
+      image.src = dataUrl;
+    });
+  }
 
   const isEmpty = messages.length === 0 && !loading;
   const canSend = (input.trim().length > 0 || !!pendingImg || !!pendingDoc) && !loading;
