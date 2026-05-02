@@ -1660,7 +1660,7 @@ body {
   box-shadow: none !important;
 }
 .z-bubble { color: var(--text); }
-.u-bubble { color: var(--accent); font-weight: 500; text-align: right; }
+.u-bubble { color: red !important; font-weight: 700; text-align: right; background: transparent !important; }
 
 /* Image in bubble */
 .bubble-img-container { position: relative; width: 100%; max-width: 320px; border-radius: 12px; overflow: hidden; margin-bottom: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.12); border: 1px solid var(--border); }
