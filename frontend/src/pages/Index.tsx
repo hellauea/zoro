@@ -1454,6 +1454,7 @@ body {
   background: var(--bg2); border-radius: 9px; font-size: 12.5px; color: var(--text);
   border: 1px solid var(--border);
 }
+.typing { display: flex; gap: 4px; padding: 0; background: transparent; width: fit-content; }
 .mem-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mem-del {
   width: 18px; height: 18px; border: none; background: transparent; color: var(--text-3);
@@ -1681,8 +1682,7 @@ body {
 .z-ic { font-family: var(--mono); font-size: 12.5px; background: rgba(0,0,0,.06); border-radius: 4px; padding: 1px 5px; }
 
 /* Bubble meta */
-.bmeta { display: flex; align-items: center; gap: 3px; opacity: 0; transition: opacity .15s; padding: 0 2px; }
-.bubble-row:hover .bmeta { opacity: 1; }
+.bmeta { display: flex; align-items: center; gap: 6px; padding: 0 2px; margin-top: 4px; transition: opacity .15s; }
 .btime { font-size: 10.5px; color: var(--text-3); }
 .bact {
   width: 22px; height: 22px; border-radius: 6px; border: none; background: transparent;
@@ -1876,7 +1876,7 @@ body {
 .dark .z-code { background: rgba(255,255,255,.04); border-color: var(--border); }
 .dark .z-ic { background: rgba(255,255,255,.06); }
 .dark .mem-item { background: var(--bg2); border-color: var(--border); }
-.dark .z-bubble { border-color: var(--border); }
+.dark .z-bubble, .dark .u-bubble { background: transparent !important; border: none !important; box-shadow: none !important; }
 .dark .sb-new:hover { background: var(--accent-light); border-color: var(--accent); }
 .dark .b-doc-card { background: rgba(255,255,255,.04); border-color: var(--border); }
 .dark .b-doc-card:hover { background: rgba(255,255,255,.07); }
