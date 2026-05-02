@@ -261,7 +261,9 @@ css_new = """.b-img { display: block; max-width: 100%; max-height: 260px; border
 .b-doc-ico { display: flex; align-items: center; justify-content: center; opacity: 0.7; }
 .b-doc-name { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
 .dark .b-doc-card { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.05); }
-.dark .b-doc-card:hover { background: rgba(255,255,255,0.08); }"""
+.dark .b-doc-card:hover { background: rgba(255,255,255,0.08); }
+.bubble { padding: 4px 0; background: transparent !important; border: none !important; box-shadow: none !important; }
+.u-bubble { color: var(--accent); font-weight: 500; text-align: right; }"""
 content = content.replace(css_old, css_new)
 
 with open("t:/zoroapk/frontend/src/pages/Index.tsx", "w", encoding="utf-8") as f:
