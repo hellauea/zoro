@@ -19,8 +19,14 @@ from markitdown import MarkItDown
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(dotenv_path=_env_path, override=True)
 
+# Initialize models
+gem_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if gem_key:
+    genai.configure(api_key=gem_key)
+else:
+    print("WARNING: No Gemini API key found in environment variables!")
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_vision = genai.GenerativeModel('gemini-2.0-flash')
 gemini_text = genai.GenerativeModel('gemini-2.0-flash')
 
