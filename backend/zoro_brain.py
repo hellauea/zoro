@@ -2,6 +2,8 @@ import os
 import datetime
 import json
 import httpx
+import random
+from urllib.parse import quote
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -24,6 +26,7 @@ load_dotenv(dotenv_path=_env_path, override=True)
 # Initialize models
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 hf_client = InferenceClient(api_key=os.getenv("HF_TOKEN"))
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 
 MODEL_NAME = "llama-3.3-70b-versatile"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -31,6 +34,8 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 _key = os.getenv("GROQ_API_KEY") or ""
 print(f"DEBUG: Loaded .env from: {_env_path}")
 print(f"DEBUG: GROQ_API_KEY = {_key[:8]}...{_key[-4:] if len(_key) > 12 else '(empty)'}")
+_t_key = os.getenv("TOGETHER_API_KEY") or ""
+print(f"DEBUG: TOGETHER_API_KEY = {_t_key[:8]}...{_t_key[-4:] if len(_t_key) > 12 else '(empty)'}")
 
 ELEVENLABS_KEY   = os.getenv("ELEVENLABS_KEY")
 ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE", "EOVAuWqgSZN2Oel78Psj")
@@ -329,26 +334,19 @@ def stream_command(req: CommandRequest):
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
                     if p:
-                        yield f"data: {json.dumps({'token': f'\n_Generating: \"{p}\" with FLUX.1..._\n\n', 'done': False})}\n\n"
+                        yield f"data: {json.dumps({'token': f'\n_Generating: \"{p}\" with Pollinations AI (Free Forever)..._\n\n', 'done': False})}\n\n"
                         try:
-                            # Generate image with FLUX.1-dev via Hugging Face
-                            image_bytes = hf_client.text_to_image(
-                                p,
-                                model="black-forest-labs/FLUX.1-dev"
-                            )
-                            
-                            # Convert PIL image/bytes to base64 data URL
-                            buffered = io.BytesIO()
-                            image_bytes.save(buffered, format="JPEG")
-                            img_base64 = base64.b64encode(buffered.getvalue()).decode()
-                            img_url = f"data:image/jpeg;base64,{img_base64}"
+                            # Generate image URL using Pollinations AI
+                            # No API key needed, unlimited and free.
+                            seed = random.randint(0, 999999)
+                            img_url = f"https://image.pollinations.ai/prompt/{quote(p)}?width=1024&height=1024&nologo=true&model=flux&seed={seed}"
                             
                             yield f"data: {json.dumps({'token': '', 'image': img_url, 'done': False})}\n\n"
                             
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully using FLUX.1-dev."})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully using Pollinations AI."})
                         except Exception as e:
-                            print(f"HF ERROR: {e}")
+                            print(f"POLLINATIONS ERROR: {e}")
                             yield f"data: {json.dumps({'token': f'\n_Drawing failed: {str(e)}_\n\n', 'done': False})}\n\n"
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed: {str(e)}"})
