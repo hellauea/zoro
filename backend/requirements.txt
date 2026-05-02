@@ -8,3 +8,4 @@ duckduckgo-search
 markitdown
 python-multipart
 httpx
+google-generativeai
