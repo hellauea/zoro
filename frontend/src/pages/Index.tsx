@@ -774,18 +774,43 @@ export default function Index() {
         }
       }
 
-      // Handle image if present
-      let image_base64 = undefined;
+      // Handle image if present — compress to avoid huge payloads
+      let image_base64: string | null = null;
       let image_mime = "image/jpeg";
       if (userMsg.image) {
-        image_base64 = userMsg.image.split(",")[1];
-        image_mime = (userMsg.image.match(/^data:([^;]+);/) || [])[1] || "image/jpeg";
+        try {
+          // Compress image using canvas to max 1024px
+          const compressed = await new Promise<string>((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              const MAX = 1024;
+              let w = img.width, h = img.height;
+              if (w > MAX || h > MAX) {
+                if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+                else { w = Math.round(w * MAX / h); h = MAX; }
+              }
+              const c = document.createElement("canvas");
+              c.width = w; c.height = h;
+              c.getContext("2d")!.drawImage(img, 0, 0, w, h);
+              resolve(c.toDataURL("image/jpeg", 0.85));
+            };
+            img.onerror = () => resolve(userMsg.image!); // fallback to original
+            img.src = userMsg.image!;
+          });
+          image_base64 = compressed.split(",")[1];
+          image_mime = "image/jpeg";
+          console.log("Image compressed, base64 length:", image_base64.length);
+        } catch {
+          // Fallback: use raw data
+          image_base64 = userMsg.image.split(",")[1];
+          image_mime = (userMsg.image.match(/^data:([^;]+);/) || [])[1] || "image/jpeg";
+        }
       }
 
       const res = await fetch(`${API}/stream`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          text: finalTxt, 
+          text: finalTxt || "what do you see in this image?", 
           image_base64, 
           image_mime, 
           history, 

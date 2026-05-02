@@ -253,32 +253,42 @@ def stream_command(req: CommandRequest):
 
     def generate():
         try:
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "web_search",
-                        "description": "Search the web for real-time information",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "The search query"}
+            if use_vision:
+                # Vision models on Groq do NOT support tools/function calling
+                print(f"VISION MODE: model={model}, text='{req.text[:80]}', image_b64_len={len(req.image_base64) if req.image_base64 else 0}")
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=1024,
+                    temperature=0.7,
+                    stream=True,
+                )
+            else:
+                tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "description": "Search the web for real-time information",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string", "description": "The search query"}
+                                },
+                                "required": ["query"],
                             },
-                            "required": ["query"],
-                        },
+                        }
                     }
-                }
-            ]
-
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=1024 if use_vision else 512,
-                temperature=0.8,
-                stream=True,
-            )
+                ]
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    max_tokens=512,
+                    temperature=0.8,
+                    stream=True,
+                )
             
             tool_call_chunks = []
             is_tool_call = False
@@ -286,7 +296,7 @@ def stream_command(req: CommandRequest):
 
             for chunk in stream:
                 delta = chunk.choices[0].delta
-                if delta.tool_calls:
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
                     is_tool_call = True
                     tc_delta = delta.tool_calls[0]
                     if not tool_call_chunks:
