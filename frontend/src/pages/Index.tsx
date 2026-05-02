@@ -23,6 +23,7 @@ type Message = {
   role: Role;
   text: string;
   image?: string;
+  status?: string;
   document?: { name: string; url: string };
   timestamp: Date;
   pinned?: boolean;
@@ -206,6 +207,12 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }
       <div className={`bwrap ${isZ ? "z-wrap" : "u-wrap"}`}>
         {msg.pinned && <span className="pin-tag">📌 pinned</span>}
         <div className={`bubble ${isZ ? "z-bubble" : "u-bubble"}`}>
+          {msg.status && (
+            <div className="b-status">
+              <span className="b-status-dot" />
+              {msg.status}
+            </div>
+          )}
           {msg.image && (
             <div className="bubble-img-container">
               <img src={msg.image} alt="" className="b-img" />
@@ -799,6 +806,7 @@ export default function Index() {
             const p = JSON.parse(line.slice(6));
             if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
             if (p.image) { setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m)); }
+            if (p.status !== undefined) { setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, status: p.status } : m)); }
             if (p.done) {
               if (settings.soundEnabled) playDone();
               if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
@@ -1610,6 +1618,24 @@ body {
 }
 .bact:hover { background: var(--border); color: var(--text); }
 .bact-on { color: var(--accent); }
+
+/* Status message */
+.b-status {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  margin-bottom: 7px; opacity: 0.85;
+  letter-spacing: 0.03em; text-transform: uppercase;
+}
+.b-status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  animation: status-pulse 1.5s infinite;
+}
+@keyframes status-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.5; }
+  100% { transform: scale(1); opacity: 1; }
+}
 
 /* Typing dots */
 .typing { display: flex; gap: 5px; align-items: center; padding: 3px 0; height: 22px; }

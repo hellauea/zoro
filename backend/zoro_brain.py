@@ -310,7 +310,7 @@ def stream_command(req: CommandRequest):
                 if fn_name == "web_search":
                     q = args.get("query", "")
                     if q:
-                        yield f"data: {json.dumps({'token': '\n_Searching..._\n\n', 'done': False})}\n\n"
+                        yield f"data: {json.dumps({'status': 'Searching...', 'done': False})}\n\n"
                         from duckduckgo_search import DDGS
                         try:
                             with DDGS() as ddgs:
@@ -318,6 +318,8 @@ def stream_command(req: CommandRequest):
                         except Exception as e:
                             print(f"SEARCH ERROR: {e}")
                             results = [{"error": "Search failed"}]
+                        
+                        yield f"data: {json.dumps({'status': '', 'done': False})}\n\n"
 
                         messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
@@ -335,20 +337,20 @@ def stream_command(req: CommandRequest):
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
                     if p:
-                        yield f"data: {json.dumps({'token': '\n_Drawing..._\n\n', 'done': False})}\n\n"
+                        yield f"data: {json.dumps({'status': 'Drawing...', 'done': False})}\n\n"
                         try:
                             # Generate image URL using Pollinations AI
-                            # Generic status message used to hide backend details.
+                            # Status is sent via 'status' field and hidden once image is ready.
                             seed = random.randint(0, 999999)
                             img_url = f"https://image.pollinations.ai/prompt/{quote(p)}?width=1024&height=1024&nologo=true&model=flux&seed={seed}"
                             
-                            yield f"data: {json.dumps({'token': '', 'image': img_url, 'done': False})}\n\n"
+                            yield f"data: {json.dumps({'status': '', 'image': img_url, 'done': False})}\n\n"
                             
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully."})
                         except Exception as e:
                             print(f"IMAGE ERROR: {e}")
-                            yield f"data: {json.dumps({'token': '\n_I couldn\'t draw that right now. Try again?_\n\n', 'done': False})}\n\n"
+                            yield f"data: {json.dumps({'status': '', 'token': '\n_I couldn\'t draw that right now. Try again?_\n\n', 'done': False})}\n\n"
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed."})
 
