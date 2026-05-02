@@ -222,8 +222,8 @@ def stream_command(req: CommandRequest):
     memory  = req.memory or []
     
     # Decide which model to use
-    use_vision = bool(req.image_base64)
-    model = VISION_MODEL if use_vision else MODEL_NAME
+    use_vision = bool(req.image_base64 and len(req.image_base64) > 10)
+    model = "llama-3.2-11b-vision-preview" if use_vision else MODEL_NAME
     
     # Build messages
     system = SYSTEM_PROMPT
@@ -231,6 +231,9 @@ def stream_command(req: CommandRequest):
         memory_block = "\n\n## THINGS YOU KNOW ABOUT THE USER\n"
         memory_block += "\n".join(f"- {m}" for m in memory)
         system = system + memory_block
+    
+    if use_vision:
+        system += "\n\n(Note: The user has attached an image to this message. Please analyze it carefully to answer their question.)"
 
     messages = [{"role": "system", "content": system}]
     for msg in history[:-1]:
@@ -241,8 +244,8 @@ def stream_command(req: CommandRequest):
         messages.append({
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{req.image_mime};base64,{req.image_base64}"}},
-                {"type": "text", "text": req.text or "what's in this image?"}
+                {"type": "text", "text": req.text or "what do you see in this image?"},
+                {"type": "image_url", "image_url": {"url": f"data:{req.image_mime};base64,{req.image_base64}"}}
             ]
         })
     else:
