@@ -20,11 +20,12 @@ _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 load_dotenv(dotenv_path=_env_path, override=True)
 
 # Initialize models
-gem_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+gem_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 if gem_key:
+    print(f"DEBUG: Gemini/Google key detected (len={len(gem_key)})")
     genai.configure(api_key=gem_key)
 else:
-    print("WARNING: No Gemini API key found in environment variables!")
+    print("WARNING: No Gemini/Google API key found!")
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 gemini_vision = genai.GenerativeModel('gemini-2.0-flash')
