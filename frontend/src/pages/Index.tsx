@@ -1207,10 +1207,10 @@ const CSS = `
   --accent-light: rgba(176,125,90,.10);
   --accent-glow:  rgba(176,125,90,.20);
 
-  --user-bg:      #1e1b17;
-  --user-fg:      #f7f4ef;
-  --zoro-bg:      #f0ece4;
-  --zoro-fg:      #1e1b17;
+  --user-bg:      transparent;
+  --user-fg:      var(--accent);
+  --zoro-bg:      transparent;
+  --zoro-fg:      var(--text);
 
   --font:         'DM Sans', system-ui, sans-serif;
   --font-display: 'Playfair Display', Georgia, serif;
@@ -1649,18 +1649,18 @@ body {
 .pin-tag { font-size: 10.5px; color: var(--accent); font-weight: 600; padding-left: 2px; }
 
 .bubble {
-  padding: 11px 16px; border-radius: 18px;
-  font-size: 14.5px; line-height: 1.68; word-break: break-word;
+  padding: 4px 0;
+  font-size: 15.5px;
+  line-height: 1.55;
+  word-break: break-word;
+  position: relative;
+  transition: all .16s;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
-.z-bubble {
-  background: var(--zoro-bg); color: var(--zoro-fg);
-  border-bottom-left-radius: 5px;
-  border: 1px solid var(--border);
-}
-.u-bubble {
-  background: var(--user-bg); color: var(--user-fg);
-  border-bottom-right-radius: 5px;
-}
+.z-bubble { color: var(--text); }
+.u-bubble { color: var(--accent); font-weight: 500; text-align: right; }
 
 /* Image in bubble */
 .bubble-img-container { position: relative; width: 100%; max-width: 320px; border-radius: 12px; overflow: hidden; margin-bottom: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.12); border: 1px solid var(--border); }
@@ -1711,7 +1711,7 @@ body {
 }
 
 /* Typing dots */
-.typing { display: flex; gap: 5px; align-items: center; padding: 3px 0; height: 22px; }
+.typing { display: flex; gap: 5px; align-items: center; padding: 4px 0; height: 22px; background: transparent; }
 .typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); animation: bounce .95s ease-in-out infinite; }
 .typing span:nth-child(2) { animation-delay: .16s; }
 .typing span:nth-child(3) { animation-delay: .32s; }
@@ -1842,10 +1842,10 @@ body {
   --accent-light: rgba(201,144,106,.10);
   --accent-glow:  rgba(201,144,106,.22);
 
-  --user-bg:      #c9906a;
-  --user-fg:      #0f0e0c;
-  --zoro-bg:      #1c1916;
-  --zoro-fg:      #ede5d8;
+  --user-bg:      transparent;
+  --user-fg:      var(--accent);
+  --zoro-bg:      transparent;
+  --zoro-fg:      var(--text);
 
   --shadow-sm:    0 1px 6px rgba(0,0,0,.3);
   --shadow:       0 2px 16px rgba(0,0,0,.4);
