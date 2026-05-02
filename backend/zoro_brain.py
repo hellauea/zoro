@@ -19,11 +19,9 @@ from huggingface_hub import InferenceClient
 from PIL import Image
 from markitdown import MarkItDown
 
-# Explicitly load .env from the project root (one level up from backend/)
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(dotenv_path=_env_path, override=True)
 
-# Initialize models
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 hf_client = InferenceClient(api_key=os.getenv("HF_TOKEN"))
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
@@ -84,6 +82,14 @@ You are ZORO — a personal AI assistant. You're basically that one friend who k
 - Never end every message with "Is there anything else I can help you with?"
 - Never mention Groq, API keys, model names, or any backend stuff
 - Never mention PC, computer, desktop, or laptop
+
+## WEB SEARCH RESULTS
+- When you have web search results, synthesize them naturally into your response
+- Cite sources inline when relevant using [Source Name](url) markdown format
+- Lead with the actual answer, then optionally mention the source
+- Don't paste raw search snippets — rewrite in your own voice
+- If results are conflicting, note that briefly
+- Keep the casual ZORO tone even with factual content
 
 ## VOICE READABILITY
 - Your responses are sometimes read aloud via text-to-speech.
@@ -204,6 +210,33 @@ def extract_memory(user_text: str, ai_response: str, existing: list[str]) -> lis
     return []
 
 
+def format_search_results_for_llm(query: str, results: list[dict]) -> str:
+    """Format search results into a structured context block for the LLM."""
+    if not results:
+        return f"[No results found for: {query}]"
+
+    lines = [f"[Web search results for: \"{query}\"]\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "Untitled")
+        body = r.get("body", r.get("snippet", ""))
+        href = r.get("href", r.get("url", ""))
+        lines.append(f"[{i}] {title}")
+        if href:
+            lines.append(f"URL: {href}")
+        if body:
+            lines.append(f"Content: {body[:400]}")
+        lines.append("")
+
+    lines.append(
+        "Synthesize these results in your ZORO voice. "
+        "Answer the user's question naturally. "
+        "When useful, cite sources inline using [Source Name](url) markdown. "
+        "Don't paste raw snippets — rewrite it in your own words. "
+        "Keep it concise and conversational."
+    )
+    return "\n".join(lines)
+
+
 # ── TTS endpoint ────────────────────────────────────────────────────────────
 
 @app.post("/tts")
@@ -258,11 +291,11 @@ def stream_command(req: CommandRequest):
                     "type": "function",
                     "function": {
                         "name": "web_search",
-                        "description": "Search the web for real-time information",
+                        "description": "Search the web for real-time information, current events, news, prices, weather, sports results, or anything that may have changed recently.",
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "query": {"type": "string", "description": "The search query"}
+                                "query": {"type": "string", "description": "The precise search query. Be specific — use keywords, not a full sentence."}
                             },
                             "required": ["query"],
                         },
@@ -289,7 +322,7 @@ def stream_command(req: CommandRequest):
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
-                max_tokens=512,
+                max_tokens=1024,
                 temperature=0.85,
                 stream=True,
             )
@@ -328,53 +361,67 @@ def stream_command(req: CommandRequest):
                 if fn_name == "web_search":
                     q = args.get("query", "")
                     if q:
-                        yield f"data: {json.dumps({'status': 'Searching...', 'done': False})}\n\n"
+                        # Show the actual query being searched
+                        yield f"data: {json.dumps({'status': f'Searching: {q}', 'done': False})}\n\n"
+
                         from duckduckgo_search import DDGS
+                        results = []
                         try:
                             with DDGS() as ddgs:
-                                results = [r for r in ddgs.text(q, max_results=3)]
+                                results = [r for r in ddgs.text(q, max_results=5)]
                         except Exception as e:
                             print(f"SEARCH ERROR: {e}")
-                            results = [{"error": "Search failed"}]
-                        
+                            results = []
+
                         yield f"data: {json.dumps({'status': '', 'done': False})}\n\n"
 
+                        # Build a rich context block for the LLM to synthesize
+                        search_context = format_search_results_for_llm(q, results)
+
                         messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "web_search",
+                            "content": search_context
+                        })
 
                         stream2 = client.chat.completions.create(
-                            model=MODEL_NAME, messages=messages,
-                            max_tokens=512, temperature=0.85, stream=True,
+                            model=MODEL_NAME,
+                            messages=messages,
+                            max_tokens=1024,
+                            temperature=0.85,
+                            stream=True,
                         )
                         for chunk in stream2:
                             token = chunk.choices[0].delta.content or ""
                             if token:
                                 full_response += token
                                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                
+
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
                     if p:
                         yield f"data: {json.dumps({'status': 'Drawing...', 'done': False})}\n\n"
                         try:
-                            # Generate image URL using Pollinations AI
-                            # Status is sent via 'status' field and hidden once image is ready.
                             seed = random.randint(0, 999999)
                             img_url = f"https://image.pollinations.ai/prompt/{quote(p)}?width=1024&height=1024&nologo=true&model=flux&seed={seed}"
-                            
                             yield f"data: {json.dumps({'status': '', 'image': img_url, 'done': False})}\n\n"
-                            
+
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully."})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": "Image generated successfully."})
                         except Exception as e:
                             print(f"IMAGE ERROR: {e}")
-                            yield f"data: {json.dumps({'status': '', 'token': '\n_I couldn\'t draw that right now. Try again?_\n\n', 'done': False})}\n\n"
+                            yield f"data: {json.dumps({'status': '', 'token': \"couldn't draw that. try again?\", 'done': False})}\n\n"
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed."})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": "Drawing failed."})
 
                         stream2 = client.chat.completions.create(
-                            model=MODEL_NAME, messages=messages,
-                            max_tokens=512, temperature=0.85, stream=True,
+                            model=MODEL_NAME,
+                            messages=messages,
+                            max_tokens=512,
+                            temperature=0.85,
+                            stream=True,
                         )
                         for chunk in stream2:
                             token = chunk.choices[0].delta.content or ""
@@ -384,6 +431,7 @@ def stream_command(req: CommandRequest):
 
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
+
         except Exception as e:
             print("STREAM ERROR:", e)
             yield f"data: {json.dumps({'token': 'hm, something went sideways. try again?', 'done': True})}\n\n"
@@ -397,14 +445,8 @@ def stream_command(req: CommandRequest):
 
 # ── Vision endpoint (image + text, streaming) ──────────────────────────────
 
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-
 @app.post("/vision")
 def vision_stream(req: ImageRequest):
-    """
-    Multimodal endpoint using Groq Llama 4 Scout.
-    Restored for reliable vision performance.
-    """
     print(f"VISION REQUEST: text='{req.text[:80]}', b64_len={len(req.image_base64)}")
 
     memory = req.memory or []
@@ -419,7 +461,6 @@ def vision_stream(req: ImageRequest):
         role = "user" if msg.role == "user" else "assistant"
         messages.append({"role": role, "content": msg.text})
 
-    # Build the multimodal user message
     data_url = f"data:{req.image_mime};base64,{req.image_base64}"
     user_text = req.text.strip() if req.text.strip() else "describe what you see in this image"
     messages.append({
@@ -450,7 +491,7 @@ def vision_stream(req: ImageRequest):
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
         except Exception as e:
             print(f"VISION ERROR: {e}")
-            yield f"data: {json.dumps({'token': f'couldn\'t process the image: {e}', 'done': True})}\n\n"
+            yield f"data: {json.dumps({'token': f'couldn\\'t process the image: {e}', 'done': True})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -467,7 +508,7 @@ async def extract_file(file: UploadFile = File(...)):
         suffix = ""
         if file.filename and "." in file.filename:
             suffix = f".{file.filename.split('.')[-1]}"
-            
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             shutil.copyfileobj(file.file, tmp)
             tmp_path = tmp.name
@@ -475,7 +516,7 @@ async def extract_file(file: UploadFile = File(...)):
         md = MarkItDown()
         result = md.convert(tmp_path)
         content = result.text_content
-        
+
         os.remove(tmp_path)
         return {"text": content}
     except Exception as e:
