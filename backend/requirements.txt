@@ -8,4 +8,5 @@ duckduckgo-search
 markitdown
 python-multipart
 httpx
-google-generativeai
+huggingface_hub
+pillow

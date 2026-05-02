@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 import tempfile
 import shutil
 import base64
-import google.generativeai as genai
+import io
+from huggingface_hub import InferenceClient
+from PIL import Image
 from markitdown import MarkItDown
 
 # Explicitly load .env from the project root (one level up from backend/)
@@ -20,20 +22,11 @@ _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 load_dotenv(dotenv_path=_env_path, override=True)
 
 # Initialize models
-gem_key = (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-if gem_key:
-    # Log masked key to verify it's being read correctly
-    masked = f"{gem_key[:6]}...{gem_key[-4:]}" if len(gem_key) > 10 else "too short"
-    print(f"DEBUG: Gemini/Google key detected: {masked} (len={len(gem_key)})")
-    genai.configure(api_key=gem_key)
-else:
-    print("WARNING: No Gemini/Google API key found!")
-
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-gemini_vision = genai.GenerativeModel('gemini-2.0-flash')
-gemini_text = genai.GenerativeModel('gemini-2.0-flash')
+hf_client = InferenceClient(api_key=os.getenv("HF_TOKEN"))
 
 MODEL_NAME = "llama-3.3-70b-versatile"
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 _key = os.getenv("GROQ_API_KEY") or ""
 print(f"DEBUG: Loaded .env from: {_env_path}")
@@ -336,24 +329,30 @@ def stream_command(req: CommandRequest):
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
                     if p:
-                        # Use Gemini to "beautify" the prompt for high quality
+                        yield f"data: {json.dumps({'token': f'\n_Generating: \"{p}\" with FLUX.1..._\n\n', 'done': False})}\n\n"
                         try:
-                            prompt_enhancer = gemini_text.generate_content(
-                                f"You are an expert prompt engineer. Expand this simple image request into a highly detailed, artistic visual prompt for an AI image generator. Keep it under 60 words. Request: {p}"
+                            # Generate image with FLUX.1-dev via Hugging Face
+                            image_bytes = hf_client.text_to_image(
+                                p,
+                                model="black-forest-labs/FLUX.1-dev"
                             )
-                            enhanced_p = prompt_enhancer.text.strip()
-                            print(f"ENHANCED PROMPT: {enhanced_p}")
-                        except:
-                            enhanced_p = p
+                            
+                            # Convert PIL image/bytes to base64 data URL
+                            buffered = io.BytesIO()
+                            image_bytes.save(buffered, format="JPEG")
+                            img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                            img_url = f"data:image/jpeg;base64,{img_base64}"
+                            
+                            yield f"data: {json.dumps({'token': '', 'image': img_url, 'done': False})}\n\n"
+                            
+                            messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully using FLUX.1-dev."})
+                        except Exception as e:
+                            print(f"HF ERROR: {e}")
+                            yield f"data: {json.dumps({'token': f'\n_Drawing failed: {str(e)}_\n\n', 'done': False})}\n\n"
+                            messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed: {str(e)}"})
 
-                        import urllib.parse
-                        safe_p = urllib.parse.quote(enhanced_p)
-                        img_url = f"https://image.pollinations.ai/prompt/{safe_p}?width=1024&height=1024&nologo=true&seed={datetime.datetime.now().microsecond}"
-                        yield f"data: {json.dumps({'token': f'\n_Generating: \"{p}\"..._\n\n', 'image': img_url, 'done': False})}\n\n"
-                        
-                        messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully using enhanced prompt: {enhanced_p}. URL: {img_url}"})
-                        
                         stream2 = client.chat.completions.create(
                             model=MODEL_NAME, messages=messages,
                             max_tokens=512, temperature=0.85, stream=True,
@@ -384,10 +383,10 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 @app.post("/vision")
 def vision_stream(req: ImageRequest):
     """
-    Multimodal endpoint using Gemini 2.0 Flash.
-    Provides elite vision understanding (OCR, object detection, logic).
+    Multimodal endpoint using Groq Llama 4 Scout.
+    Restored for reliable vision performance.
     """
-    print(f"GEMINI VISION REQUEST: text='{req.text[:80]}', b64_len={len(req.image_base64)}")
+    print(f"VISION REQUEST: text='{req.text[:80]}', b64_len={len(req.image_base64)}")
 
     memory = req.memory or []
     system = SYSTEM_PROMPT
@@ -396,28 +395,34 @@ def vision_stream(req: ImageRequest):
         memory_block += "\n".join(f"- {m}" for m in memory)
         system += memory_block
 
+    messages = [{"role": "system", "content": system}]
+    for msg in (req.history or [])[:-1]:
+        role = "user" if msg.role == "user" else "assistant"
+        messages.append({"role": role, "content": msg.text})
+
+    # Build the multimodal user message
+    data_url = f"data:{req.image_mime};base64,{req.image_base64}"
+    user_text = req.text.strip() if req.text.strip() else "describe what you see in this image"
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    })
+
     def generate():
         full_response = ""
         try:
-            # Prepare contents for Gemini
-            # History first
-            contents = []
-            for m in (req.history or [])[:-1]:
-                contents.append({"role": "user" if m.role == "user" else "model", "parts": [m.text]})
-            
-            # Current message with image
-            import base64
-            contents.append({
-                "role": "user",
-                "parts": [
-                    {"text": f"System Context: {system}\n\nUser Question: {req.text or 'describe this image'}"},
-                    {"inline_data": {"mime_type": req.image_mime, "data": req.image_base64}}
-                ]
-            })
-
-            response = gemini_vision.generate_content(contents, stream=True)
-            for chunk in response:
-                token = chunk.text
+            stream = client.chat.completions.create(
+                model=VISION_MODEL,
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.7,
+                stream=True,
+            )
+            for chunk in stream:
+                token = chunk.choices[0].delta.content or ""
                 if token:
                     full_response += token
                     yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
@@ -425,8 +430,8 @@ def vision_stream(req: ImageRequest):
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
         except Exception as e:
-            print(f"GEMINI VISION ERROR: {e}")
-            yield f"data: {json.dumps({'token': f'ZORO vision glitch: {e}', 'done': True})}\n\n"
+            print(f"VISION ERROR: {e}")
+            yield f"data: {json.dumps({'token': f'couldn\'t process the image: {e}', 'done': True})}\n\n"
 
     return StreamingResponse(
         generate(),
