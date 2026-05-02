@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import {
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
@@ -15,6 +16,11 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Handle redirect result (for mobile/Capacitor)
+    getRedirectResult(auth).catch((err) => {
+      console.error("Redirect auth error:", err);
+    });
+
     const unsub = onAuthStateChanged(
       auth,
       (u) => {
@@ -30,7 +36,12 @@ export function useAuth() {
   }, []);
 
   const signInWithGoogle = async () => {
-    await signInWithPopup(auth, googleProvider);
+    try {
+      await signInWithRedirect(auth, googleProvider);
+    } catch (err) {
+      console.error("Google sign-in error:", err);
+      throw err;
+    }
   };
 
   const signInWithEmail = async (email: string, password: string) => {

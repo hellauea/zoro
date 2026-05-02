@@ -714,16 +714,41 @@ export default function Index() {
   const send = async (override?: string) => {
     const txt = (override ?? input).trim();
     if ((!txt && !pendingImg && !pendingDoc) || loading) return;
-    stopSpeaking(); setSpeakingId(null);
 
+    // Start loading and clear input immediately for responsiveness
+    setLoading(true);
+    stopSpeaking(); 
+    setSpeakingId(null);
+    
     const doc = pendingDoc;
+    const img = pendingImg;
+    
+    // Clear inputs immediately
+    setInput("");
+    setPendingImg(null);
+    setPendingDoc(null);
+
     let docUrl = "";
     if (doc && uid) {
-      try { docUrl = await uploadDocument(uid, doc.file); } catch { console.error("Upload failed"); }
+      try { 
+        docUrl = await uploadDocument(uid, doc.file); 
+      } catch (e) { 
+        console.error("Upload failed:", e); 
+      }
     }
-    const userMsg: Message = { id: makeId(), role: "user", text: txt || (doc ? doc.name : ""), image: pendingImg ?? undefined, document: docUrl ? { name: doc.name, url: docUrl } : undefined, timestamp: new Date() };
+
+    const userMsg: Message = { 
+      id: makeId(), 
+      role: "user", 
+      text: txt || (doc ? doc.name : ""), 
+      image: img ?? undefined, 
+      document: docUrl ? { name: doc.name, url: docUrl } : undefined, 
+      timestamp: new Date() 
+    };
+
     const next = [...messages, userMsg];
-    setMessages(next); setInput(""); setLoading(true); setPendingImg(null); setPendingDoc(null);
+    setMessages(next);
+    
     const history = next.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
     const activeMemory = isTempChat ? [] : memory;
 
@@ -745,6 +770,7 @@ export default function Index() {
         const sid = makeId();
         setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
         let finalTxt = txt;
+        
         if (doc) {
           try {
             const fd = new FormData();
@@ -753,13 +779,22 @@ export default function Index() {
             if (extRes.ok) {
                const extData = await extRes.json();
                finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim();
-            } else finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
-          } catch { finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); }
+            } else {
+               finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim();
+            }
+          } catch (e) { 
+            console.error("Extraction error:", e);
+            finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); 
+          }
         }
+        
         const res = await fetch(`${API}/stream`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: finalTxt, history, memory: activeMemory }),
         });
+        
+        if (!res.ok) throw new Error("Stream failed");
+        
         const reader = res.body!.getReader(); const dec = new TextDecoder();
         let buf = "", full = "";
         while (true) {
@@ -770,7 +805,11 @@ export default function Index() {
             if (!line.startsWith("data: ")) continue;
             try {
               const p = JSON.parse(line.slice(6));
-              if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
+              if (p.token) { 
+                full += p.token; 
+                const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); 
+                setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); 
+              }
               if (p.done) {
                 if (settings.soundEnabled) playDone();
                 if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
@@ -788,10 +827,12 @@ export default function Index() {
           }
         }
       }
-    } catch {
+    } catch (e) {
+      console.error("Send error:", e);
       setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
     }
-    setLoading(false); setTimeout(() => taRef.current?.focus(), 0);
+    setLoading(false); 
+    setTimeout(() => taRef.current?.focus(), 0);
   };
 
   const isEmpty = messages.length === 0 && !loading;

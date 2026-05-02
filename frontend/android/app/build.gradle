@@ -1,6 +1,7 @@
 apply plugin: 'com.android.application'
 
 android {
+    project.archivesBaseName = "zoro"
     namespace = "com.hellauea.zoro"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {

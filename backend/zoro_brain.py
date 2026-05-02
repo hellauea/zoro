@@ -324,7 +324,7 @@ def stream_command(req: CommandRequest):
 
 # ── Image endpoint ──────────────────────────────────────────────────────────
 
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 
 @app.post("/image", response_model=CommandResponse)
 def image_command(req: ImageRequest):
