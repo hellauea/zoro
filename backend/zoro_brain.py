@@ -412,7 +412,8 @@ def stream_command(req: CommandRequest):
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": "Image generated successfully."})
                         except Exception as e:
                             print(f"IMAGE ERROR: {e}")
-                            yield f"data: {json.dumps({'status': '', 'token': \"couldn't draw that. try again?\", 'done': False})}\n\n"
+                            err_msg = "couldn't draw that. try again?"
+                            yield f"data: {json.dumps({'status': '', 'token': err_msg, 'done': False})}\n\n"
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": "Drawing failed."})
 
@@ -491,7 +492,8 @@ def vision_stream(req: ImageRequest):
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
         except Exception as e:
             print(f"VISION ERROR: {e}")
-            yield f"data: {json.dumps({'token': f'couldn\\'t process the image: {e}', 'done': True})}\n\n"
+            err_msg = f"couldn't process the image: {e}"
+            yield f"data: {json.dumps({'token': err_msg, 'done': True})}\n\n"
 
     return StreamingResponse(
         generate(),
