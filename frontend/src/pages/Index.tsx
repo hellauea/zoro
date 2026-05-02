@@ -614,6 +614,16 @@ export default function Index() {
       const [c, m, s] = await Promise.all([floadChats(uid), floadMemory(uid), loadUserSettings(uid)]);
       if (cancelled) return;
       setChats(c); setMemory(m); setSettings(s); setDataLoaded(true);
+
+      // Restore active chat session
+      const savedId = localStorage.getItem(`zoro_active_chat_${uid}`);
+      if (savedId) {
+        const active = c.find(chat => chat.id === savedId);
+        if (active) {
+          setActiveChatId(active.id);
+          setMessages(active.messages);
+        }
+      }
     })();
     return () => { cancelled = true; };
   }, [uid]);
@@ -644,6 +654,14 @@ export default function Index() {
     document.addEventListener("mousedown", fn);
     return () => document.removeEventListener("mousedown", fn);
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (uid && activeChatId) {
+      localStorage.setItem(`zoro_active_chat_${uid}`, activeChatId);
+    } else if (uid && activeChatId === null) {
+      localStorage.removeItem(`zoro_active_chat_${uid}`);
+    }
+  }, [activeChatId, uid]);
 
   useEffect(() => {
     if (!uid || !dataLoaded || !messages.length || !settings.storeHistory || isTempChat) return;
