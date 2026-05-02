@@ -236,6 +236,20 @@ def stream_command(req: CommandRequest):
                             "required": ["query"],
                         },
                     }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "generate_image",
+                        "description": "Generate a high-quality image based on a prompt",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {"type": "string", "description": "The detailed visual prompt for the image"}
+                            },
+                            "required": ["prompt"],
+                        },
+                    }
                 }
             ]
 
@@ -274,32 +288,56 @@ def stream_command(req: CommandRequest):
 
             if is_tool_call:
                 tc = tool_call_chunks[0]
+                fn_name = tc["function"]["name"]
                 try:
-                    q = json.loads(tc["function"]["arguments"]).get("query", "")
+                    args = json.loads(tc["function"]["arguments"])
                 except:
-                    q = ""
+                    args = {}
 
-                if q:
-                    yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
-                    from duckduckgo_search import DDGS
-                    try:
-                        with DDGS() as ddgs:
-                            results = [r for r in ddgs.text(q, max_results=3)]
-                    except Exception as e:
-                        results = [{"error": str(e)}]
+                if fn_name == "web_search":
+                    q = args.get("query", "")
+                    if q:
+                        yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
+                        from duckduckgo_search import DDGS
+                        try:
+                            with DDGS() as ddgs:
+                                results = [r for r in ddgs.text(q, max_results=3)]
+                        except Exception as e:
+                            results = [{"error": str(e)}]
 
-                    messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
+                        messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
 
-                    stream2 = client.chat.completions.create(
-                        model=MODEL_NAME, messages=messages,
-                        max_tokens=512, temperature=0.85, stream=True,
-                    )
-                    for chunk in stream2:
-                        token = chunk.choices[0].delta.content or ""
-                        if token:
-                            full_response += token
-                            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                        stream2 = client.chat.completions.create(
+                            model=MODEL_NAME, messages=messages,
+                            max_tokens=512, temperature=0.85, stream=True,
+                        )
+                        for chunk in stream2:
+                            token = chunk.choices[0].delta.content or ""
+                            if token:
+                                full_response += token
+                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+                
+                elif fn_name == "generate_image":
+                    p = args.get("prompt", "")
+                    if p:
+                        import urllib.parse
+                        safe_p = urllib.parse.quote(p)
+                        img_url = f"https://image.pollinations.ai/prompt/{safe_p}?width=1024&height=1024&nologo=true&seed={datetime.datetime.now().microsecond}"
+                        yield f"data: {json.dumps({'token': f'\n_Generating image: \"{p}\"..._\n\n', 'image': img_url, 'done': False})}\n\n"
+                        
+                        messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully. URL: {img_url}"})
+                        
+                        stream2 = client.chat.completions.create(
+                            model=MODEL_NAME, messages=messages,
+                            max_tokens=512, temperature=0.85, stream=True,
+                        )
+                        for chunk in stream2:
+                            token = chunk.choices[0].delta.content or ""
+                            if token:
+                                full_response += token
+                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
 
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"

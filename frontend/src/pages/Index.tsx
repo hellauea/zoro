@@ -813,6 +813,9 @@ export default function Index() {
               const c = full.replace(/\[System:[^\]]*\]/g, "").trim();
               setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m));
             }
+            if (p.image) {
+              setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m));
+            }
             if (p.done) {
               if (settings.soundEnabled) playDone();
               if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
