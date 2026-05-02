@@ -97,6 +97,7 @@ async function speakText(text: string, onEnd?: () => void) {
 
 function renderMd(text: string) {
   return text.replace(/\[System:[^\]]*\]/g, "").trim()
+    .replace(/https:\/\/image\.pollinations\.ai\/prompt\/[^\s)]+/g, "") // Hide image URLs
     .replace(/```(\w*)\n?([\s\S]*?)```/g, (_: string, __: string, c: string) => `<pre class="z-code"><code>${c.trim().replace(/&/g, "&amp;").replace(/</g, "&lt;")}</code></pre>`)
     .replace(/`([^`]+)`/g, "<code class='z-ic'>$1</code>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
@@ -151,6 +152,8 @@ const Ico = {
   chat: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>,
   clip: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>,
   camera: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>,
+  download: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>,
+  external: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>,
 };
 
 // ─── Message Bubble ───────────────────────────────────────────────────────────
@@ -162,11 +165,27 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }
   speaking: boolean; tts: boolean; isLastZoro: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const [imgCopied, setImgCopied] = useState(false);
   const isZ = msg.role === "zoro";
   const time = msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const copy = () => {
     navigator.clipboard.writeText(msg.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
+  };
+
+  const copyLink = (url: string) => {
+    navigator.clipboard.writeText(url).then(() => { setImgCopied(true); setTimeout(() => setImgCopied(false), 1800); });
+  };
+
+  const dlImg = async (url: string) => {
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `zoro-${Date.now()}.jpg`;
+      link.click();
+    } catch (e) { console.error("Download failed", e); }
   };
 
   return (
@@ -184,7 +203,15 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }
       <div className={`bwrap ${isZ ? "z-wrap" : "u-wrap"}`}>
         {msg.pinned && <span className="pin-tag">📌 pinned</span>}
         <div className={`bubble ${isZ ? "z-bubble" : "u-bubble"}`}>
-          {msg.image && <img src={msg.image} alt="" className="b-img" />}
+          {msg.image && (
+            <div className="bubble-img-container">
+              <img src={msg.image} alt="" className="b-img" />
+              <div className="img-overlay">
+                <button className="img-btn" onClick={() => dlImg(msg.image!)} title="Download">{Ico.download}</button>
+                <button className="img-btn" onClick={() => copyLink(msg.image!)} title="Copy Link">{imgCopied ? Ico.check : Ico.external}</button>
+              </div>
+            </div>
+          )}
           {msg.document && (
             <a href={msg.document.url} target="_blank" rel="noopener noreferrer" className="b-doc-card">
               <span className="b-doc-ico">{Ico.clip}</span>
@@ -1324,7 +1351,16 @@ body { font-family: var(--font); background: var(--cream); color: var(--dark); }
 .bubble { padding: 10px 14px; border-radius: var(--radius); font-size: 14px; line-height: 1.65; word-break: break-word; }
 .z-bubble { background: var(--zoro-bg); color: var(--zoro-fg); border-bottom-left-radius: 5px; }
 .u-bubble { background: var(--user-bg); color: var(--user-fg); border-bottom-right-radius: 5px; }
-.b-img { display: block; max-width: 100%; max-height: 260px; border-radius: 10px; margin-bottom: 7px; object-fit: contain; }
+.bubble-img-container { position: relative; width: 100%; max-width: 320px; border-radius: 12px; overflow: hidden; margin-bottom: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.05); }
+.b-img { display: block; width: 100%; height: auto; object-fit: contain; transition: transform 0.3s; }
+.bubble-img-container:hover .b-img { transform: scale(1.02); }
+.img-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.25); display: flex; align-items: center; justify-content: center; gap: 12px; opacity: 0; transition: opacity 0.2s; backdrop-filter: blur(2px); }
+.bubble-img-container:hover .img-overlay { opacity: 1; }
+.img-btn { width: 38px; height: 38px; border-radius: 50%; border: none; background: rgba(255,255,255,0.9); color: #2e2a25; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.15); transition: transform 0.15s, background 0.15s; }
+.img-btn:hover { transform: scale(1.1); background: #fff; }
+.img-btn:active { transform: scale(0.95); }
+.dark .img-btn { background: rgba(46,42,37,0.9); color: #faf7f2; }
+.dark .img-btn:hover { background: #2e2a25; }
 .b-doc-card { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(0,0,0,0.05); border-radius: 8px; text-decoration: none; color: inherit; margin-bottom: 6px; border: 1px solid rgba(0,0,0,0.05); transition: background 0.15s; }
 .b-doc-card:hover { background: rgba(0,0,0,0.08); }
 .b-doc-ico { display: flex; align-items: center; justify-content: center; opacity: 0.7; }
