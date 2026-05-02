@@ -699,42 +699,79 @@ export default function Index() {
     if (idx === -1) return;
     const prevMsgs = messages.slice(0, idx);
     setMessages(prevMsgs);
-    // Find the last user message text
+    
     const lastUserMsg = [...prevMsgs].reverse().find(m => m.role === "user");
     if (lastUserMsg) {
-       // Re-trigger send but bypass normal txt logic. We will resend the exact state.
-       setLoading(true);
-       const history = prevMsgs.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
-       try {
-         const sid = makeId();
-         setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
-         
-         const res = await fetch(`${API}/stream`, {
-           method: "POST", headers: { "Content-Type": "application/json" },
-           body: JSON.stringify({ text: " ", history, memory: isTempChat ? [] : memory }),
-         });
-         const reader = res.body!.getReader(); const dec = new TextDecoder();
-         let buf = "", full = "";
-         while (true) {
-           const { done, value } = await reader.read(); if (done) break;
-           buf += dec.decode(value, { stream: true });
-           const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
-           for (const line of lines) {
-             if (!line.startsWith("data: ")) continue;
-             try {
-               const p = JSON.parse(line.slice(6));
-               if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
-               if (p.done) {
-                 if (settings.soundEnabled) playDone();
-                 if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
-               }
-             } catch { }
-           }
-         }
-       } catch {
-         setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
-       }
-       setLoading(false);
+      setLoading(true);
+      const history = prevMsgs.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
+      const activeMemory = isTempChat ? [] : memory;
+      const sid = makeId();
+      setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
+      
+      try {
+        let res;
+        if (lastUserMsg.image) {
+          res = await fetch(`${API}/vision`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: lastUserMsg.text || "describe what you see in this image",
+              image_base64: lastUserMsg.image.includes(",") ? lastUserMsg.image.split(",")[1] : lastUserMsg.image,
+              image_mime: "image/jpeg",
+              history,
+              memory: activeMemory
+            }),
+          });
+        } else {
+          res = await fetch(`${API}/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: lastUserMsg.text, history, memory: activeMemory }),
+          });
+        }
+
+        if (!res.ok) throw new Error();
+
+        const reader = res.body!.getReader();
+        const dec = new TextDecoder();
+        let buf = "", full = "";
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const p = JSON.parse(line.slice(6));
+              if (p.token) {
+                full += p.token;
+                const c = full.replace(/\[System:[^\]]*\]/g, "").trim();
+                setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m));
+              }
+              if (p.image) {
+                setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m));
+              }
+              if (p.done) {
+                if (settings.soundEnabled) playDone();
+                if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
+                if (!isTempChat && p.new_memory?.length > 0) {
+                  setMemory(prev => {
+                    const merged = [...prev];
+                    for (const item of p.new_memory) {
+                      if (item && !merged.includes(item)) merged.push(item);
+                    }
+                    return merged;
+                  });
+                }
+              }
+            } catch { }
+          }
+        }
+      } catch (e) {
+        console.error("Regen error:", e);
+        setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
+      }
+      setLoading(false);
     }
   };
 
