@@ -266,41 +266,15 @@ def stream_command(req: CommandRequest):
                 }
             ]
 
-            try:
-                stream = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    max_tokens=512,
-                    temperature=0.85,
-                    stream=True,
-                )
-            except Exception as e:
-                print(f"GROQ ERROR (Switching to Pollinations): {e}")
-                # Fallback to Pollinations AI (Free & Always works)
-                url = "https://text.pollinations.ai/openai/chat/completions"
-                payload = {
-                    "model": "openai",
-                    "messages": messages,
-                    "max_tokens": 512,
-                    "temperature": 0.85,
-                    "stream": True
-                }
-                with httpx.stream("POST", url, json=payload, timeout=60) as resp:
-                    for line in resp.iter_lines():
-                        if line.startswith("data: "):
-                            if line.strip() == "data: [DONE]": break
-                            try:
-                                data = json.loads(line[6:])
-                                token = data["choices"][0]["delta"].get("content", "")
-                                if token:
-                                    full_response += token
-                                    yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                            except: continue
-                new_mem = extract_memory(req.text, full_response, memory)
-                yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
-                return
+            stream = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=512,
+                temperature=0.85,
+                stream=True,
+            )
 
             tool_call_chunks = []
             is_tool_call = False
@@ -350,31 +324,15 @@ def stream_command(req: CommandRequest):
                         messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
 
-                        try:
-                            stream2 = client.chat.completions.create(
-                                model=MODEL_NAME, messages=messages,
-                                max_tokens=512, temperature=0.85, stream=True,
-                            )
-                            for chunk in stream2:
-                                token = chunk.choices[0].delta.content or ""
-                                if token:
-                                    full_response += token
-                                    yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                        except:
-                            # Fallback text completion via Pollinations if Groq fails here too
-                            url = "https://text.pollinations.ai/openai/chat/completions"
-                            payload = {"model": "openai", "messages": messages, "max_tokens": 512, "stream": True}
-                            with httpx.stream("POST", url, json=payload, timeout=60) as resp:
-                                for line in resp.iter_lines():
-                                    if line.startswith("data: "):
-                                        if line.strip() == "data: [DONE]": break
-                                        try:
-                                            data = json.loads(line[6:])
-                                            token = data["choices"][0]["delta"].get("content", "")
-                                            if token:
-                                                full_response += token
-                                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                                        except: continue
+                        stream2 = client.chat.completions.create(
+                            model=MODEL_NAME, messages=messages,
+                            max_tokens=512, temperature=0.85, stream=True,
+                        )
+                        for chunk in stream2:
+                            token = chunk.choices[0].delta.content or ""
+                            if token:
+                                full_response += token
+                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
                 
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
@@ -396,31 +354,15 @@ def stream_command(req: CommandRequest):
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed."})
 
-                        try:
-                            stream2 = client.chat.completions.create(
-                                model=MODEL_NAME, messages=messages,
-                                max_tokens=512, temperature=0.85, stream=True,
-                            )
-                            for chunk in stream2:
-                                token = chunk.choices[0].delta.content or ""
-                                if token:
-                                    full_response += token
-                                    yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                        except:
-                            # Fallback text completion via Pollinations
-                            url = "https://text.pollinations.ai/openai/chat/completions"
-                            payload = {"model": "openai", "messages": messages, "max_tokens": 512, "stream": True}
-                            with httpx.stream("POST", url, json=payload, timeout=60) as resp:
-                                for line in resp.iter_lines():
-                                    if line.startswith("data: "):
-                                        if line.strip() == "data: [DONE]": break
-                                        try:
-                                            data = json.loads(line[6:])
-                                            token = data["choices"][0]["delta"].get("content", "")
-                                            if token:
-                                                full_response += token
-                                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-                                        except: continue
+                        stream2 = client.chat.completions.create(
+                            model=MODEL_NAME, messages=messages,
+                            max_tokens=512, temperature=0.85, stream=True,
+                        )
+                        for chunk in stream2:
+                            token = chunk.choices[0].delta.content or ""
+                            if token:
+                                full_response += token
+                                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
 
             new_mem = extract_memory(req.text, full_response, memory)
             yield f"data: {json.dumps({'token': '', 'done': True, 'new_memory': new_mem})}\n\n"
