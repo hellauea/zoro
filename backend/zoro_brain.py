@@ -310,13 +310,14 @@ def stream_command(req: CommandRequest):
                 if fn_name == "web_search":
                     q = args.get("query", "")
                     if q:
-                        yield f"data: {json.dumps({'token': '\n_Searching the web..._\n\n', 'done': False})}\n\n"
+                        yield f"data: {json.dumps({'token': '\n_Searching..._\n\n', 'done': False})}\n\n"
                         from duckduckgo_search import DDGS
                         try:
                             with DDGS() as ddgs:
                                 results = [r for r in ddgs.text(q, max_results=3)]
                         except Exception as e:
-                            results = [{"error": str(e)}]
+                            print(f"SEARCH ERROR: {e}")
+                            results = [{"error": "Search failed"}]
 
                         messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "web_search", "content": json.dumps(results)})
@@ -334,22 +335,22 @@ def stream_command(req: CommandRequest):
                 elif fn_name == "generate_image":
                     p = args.get("prompt", "")
                     if p:
-                        yield f"data: {json.dumps({'token': f'\n_Generating: \"{p}\" with Pollinations AI (Free Forever)..._\n\n', 'done': False})}\n\n"
+                        yield f"data: {json.dumps({'token': '\n_Drawing..._\n\n', 'done': False})}\n\n"
                         try:
                             # Generate image URL using Pollinations AI
-                            # No API key needed, unlimited and free.
+                            # Generic status message used to hide backend details.
                             seed = random.randint(0, 999999)
                             img_url = f"https://image.pollinations.ai/prompt/{quote(p)}?width=1024&height=1024&nologo=true&model=flux&seed={seed}"
                             
                             yield f"data: {json.dumps({'token': '', 'image': img_url, 'done': False})}\n\n"
                             
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully using Pollinations AI."})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Image generated successfully."})
                         except Exception as e:
-                            print(f"POLLINATIONS ERROR: {e}")
-                            yield f"data: {json.dumps({'token': f'\n_Drawing failed: {str(e)}_\n\n', 'done': False})}\n\n"
+                            print(f"IMAGE ERROR: {e}")
+                            yield f"data: {json.dumps({'token': '\n_I couldn\'t draw that right now. Try again?_\n\n', 'done': False})}\n\n"
                             messages.append({"role": "assistant", "tool_calls": tool_call_chunks})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed: {str(e)}"})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "name": "generate_image", "content": f"Drawing failed."})
 
                         stream2 = client.chat.completions.create(
                             model=MODEL_NAME, messages=messages,
