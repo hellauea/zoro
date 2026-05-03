@@ -27,6 +27,7 @@ type Message = {
   document?: { name: string; url: string };
   timestamp: Date;
   pinned?: boolean;
+  edited?: boolean;
 };
 
 type Chat = {
@@ -232,16 +233,26 @@ function TypingDots() {
 
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 
-function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro, index }: {
+function Bubble({ msg, onPin, onSpeak, onRegenerate, onEdit, speaking, tts, isLastZoro, index }: {
   msg: Message; onPin: (id: string) => void;
   onSpeak: (text: string, id: string) => void;
   onRegenerate: (id: string) => void;
+  onEdit: (id: string, text: string) => void;
   speaking: boolean; tts: boolean; isLastZoro: boolean; index: number;
 }) {
   const [copied, setCopied] = useState(false);
   const [hovering, setHovering] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(msg.text);
   const isZ = msg.role === "zoro";
   const time = msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const handleSave = () => {
+    if (editValue.trim() && (editValue !== msg.text || msg.edited)) {
+      onEdit(msg.id, editValue.trim());
+    }
+    setIsEditing(false);
+  };
 
   const copy = () => {
     navigator.clipboard.writeText(msg.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
@@ -315,7 +326,29 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro, 
           {isZ
             ? msg.text === "" ? <TypingDots />
               : <div className="z-md" dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }} />
-            : <span className="u-text">{msg.text}</span>}
+            : isEditing ? (
+              <div className="edit-wrap">
+                <textarea
+                  className="edit-ta"
+                  value={editValue}
+                  onChange={e => setEditValue(e.target.value)}
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); }
+                    if (e.key === "Escape") { setIsEditing(false); setEditValue(msg.text); }
+                  }}
+                />
+                <div className="edit-acts">
+                  <button className="edit-btn edit-cancel" onClick={() => { setIsEditing(false); setEditValue(msg.text); }}>Cancel</button>
+                  <button className="edit-btn edit-save" onClick={handleSave}>Save & Regenerate</button>
+                </div>
+              </div>
+            ) : (
+              <div className="u-bubble-content">
+                <span className="u-text">{msg.text}</span>
+                {msg.edited && <span className="edited-tag">(edited)</span>}
+              </div>
+            )}
         </div>
 
         <AnimatePresence>
@@ -345,6 +378,11 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro, 
                 {isZ && tts && msg.text && (
                   <button className={`bact${speaking ? " bact-on" : ""}`} onClick={() => onSpeak(msg.text, msg.id)}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />{speaking ? <><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></> : <line x1="23" y1="9" x2="17" y2="15" />}</svg>
+                  </button>
+                )}
+                {!isZ && (
+                  <button className="bact" onClick={() => { setIsEditing(true); setEditValue(msg.text); }} title="Edit">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
                   </button>
                 )}
               </div>
@@ -1010,6 +1048,94 @@ export default function Index() {
     setLoading(false);
   };
 
+  const handleEdit = async (id: string, newText: string) => {
+    const idx = messages.findIndex(m => m.id === id);
+    if (idx === -1) return;
+
+    // Update the message and remove everything after it
+    const updatedMessages = messages.slice(0, idx + 1).map((m, i) =>
+      i === idx ? { ...m, text: newText, edited: true } : m
+    );
+
+    setMessages(updatedMessages);
+    setLoading(true);
+    stopSpeaking();
+    setSpeakingId(null);
+
+    const history = updatedMessages.slice(-20, -1).map(m => ({
+      role: m.role === "user" ? "user" : "assistant",
+      text: m.text
+    }));
+    const activeMemory = isTempChat ? [] : memory;
+    const sid = makeId();
+    const lastMsg = updatedMessages[updatedMessages.length - 1];
+
+    setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
+
+    try {
+      let res: Response;
+      if (lastMsg.image) {
+        const b64 = lastMsg.image.includes(",") ? lastMsg.image.split(",")[1] : lastMsg.image;
+        res = await fetch(`${API}/vision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: newText || "describe what you see in this image",
+            image_base64: b64,
+            image_mime: "image/jpeg",
+            history,
+            memory: activeMemory
+          })
+        });
+      } else {
+        res = await fetch(`${API}/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: newText, history, memory: activeMemory })
+        });
+      }
+
+      if (!res.ok) throw new Error();
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "", full = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const p = JSON.parse(line.slice(6));
+            if (p.token) {
+              full += p.token;
+              const c = full.replace(/\[System:[^\]]*\]/g, "").trim();
+              setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m));
+            }
+            if (p.image) setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m));
+            if (p.done) {
+              if (settings.soundEnabled) playDone();
+              if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
+              if (!isTempChat && p.new_memory?.length) {
+                setMemory(prev => {
+                  const merged = [...prev];
+                  for (const item of p.new_memory) if (item && !merged.includes(item)) merged.push(item);
+                  return merged;
+                });
+              }
+            }
+          } catch { }
+        }
+      }
+    } catch {
+      setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
+    }
+    setLoading(false);
+  };
+
   const send = async (override?: string) => {
     const txt = (override ?? input).trim();
     if ((!txt && !pendingImg && !pendingDoc) || loading) return;
@@ -1253,6 +1379,7 @@ export default function Index() {
                         <Bubble key={msg.id} msg={msg} index={i}
                           onPin={id => setMessages(p => p.map(m => m.id === id ? { ...m, pinned: !m.pinned } : m))}
                           onSpeak={handleSpeak} onRegenerate={handleRegenerate}
+                          onEdit={handleEdit}
                           speaking={speakingId === msg.id} tts={settings.ttsEnabled}
                           isLastZoro={msg.role === "zoro" && i === arr.length - 1} />
                       ))}
@@ -1672,4 +1799,17 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);-webkit-font
 .dark .preview-close{background:#2a2a2a;}
 .dark .preview-close:hover{background:#3a3a3a;}
 .dark .cursor-glow{background:radial-gradient(circle,rgba(196,149,110,0.06) 0%,transparent 65%);}
+
+/* Edit Mode */
+.edit-wrap{width:100%;margin:4px 0;}
+.edit-ta{width:100%;min-height:80px;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:12px;font-family:var(--font);font-size:14.5px;color:var(--text);resize:none;outline:none;line-height:1.6;}
+.edit-ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--al);}
+.edit-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:10px;}
+.edit-btn{padding:8px 14px;border-radius:10px;font-family:var(--font);font-size:12.5px;font-weight:500;cursor:pointer;transition:all 0.12s;border:none;}
+.edit-cancel{background:var(--bg2);color:var(--text2);}
+.edit-cancel:hover{background:var(--border2);color:var(--text);}
+.edit-save{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 2px 8px var(--ag);}
+.edit-save:hover{opacity:0.9;transform:translateY(-1px);}
+.u-bubble-content{display:flex;flex-direction:column;align-items:flex-end;gap:2px;}
+.edited-tag{font-size:9.5px;color:var(--text3);font-style:italic;}
 `;  
