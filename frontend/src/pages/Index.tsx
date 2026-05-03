@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { motion, AnimatePresence, useSpring, useMotionValue, useTransform, LayoutGroup } from "framer-motion";
 import { useAuth } from "@/hooks/useAuth";
 import {
   saveChat as fsaveChat,
@@ -50,42 +50,38 @@ type SuggestionItem = { icon: string; label: string; prompt: string };
 const API = import.meta.env.VITE_API_URL as string;
 
 const SUGGESTIONS: SuggestionItem[] = [
-  { icon: "🖼️", label: "Create an image", prompt: "Create a detailed, vibrant image of " },
-  { icon: "✍️", label: "Write for me", prompt: "Write a compelling " },
-  { icon: "💡", label: "Brainstorm ideas", prompt: "Give me 10 creative ideas for " },
-  { icon: "🔍", label: "Research a topic", prompt: "Give me a comprehensive breakdown of " },
-  { icon: "📖", label: "Explain something", prompt: "Explain in simple terms: " },
-  { icon: "🎯", label: "Help me plan", prompt: "Help me create a detailed plan for " },
+  { icon: "✦", label: "Create an image", prompt: "Create a detailed, vibrant image of " },
+  { icon: "✍", label: "Write for me", prompt: "Write a compelling " },
+  { icon: "◈", label: "Brainstorm", prompt: "Give me 10 creative ideas for " },
+  { icon: "⌖", label: "Research", prompt: "Give me a comprehensive breakdown of " },
+  { icon: "◎", label: "Explain", prompt: "Explain in simple terms: " },
+  { icon: "▷", label: "Plan", prompt: "Help me create a detailed plan for " },
 ];
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
 
 let activeAudio: HTMLAudioElement | null = null;
-
 function stopSpeaking() { if (activeAudio) { activeAudio.pause(); activeAudio = null; } }
 
 function playDone() {
   try {
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const note = (f: number, d: number, dur: number, v: number) => {
+    [[523, 0, 0.3, 0.06], [659, 0.1, 0.28, 0.05], [784, 0.2, 0.22, 0.04]].forEach(([f, d, dur, v]) => {
       const o = ctx.createOscillator(); const g = ctx.createGain(); const t = ctx.currentTime + d;
+      o.type = "sine";
       o.frequency.setValueAtTime(f, t); g.gain.setValueAtTime(0, t);
       g.gain.linearRampToValueAtTime(v, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + dur + 0.05);
-    };
-    note(523, 0, 0.4, 0.07); note(659, 0.12, 0.35, 0.06);
+    });
   } catch { }
 }
 
 async function speakText(text: string, onEnd?: () => void) {
   stopSpeaking();
-  const clean = text.replace(/```[\s\S]*?```/g, "code").replace(/[*_#`]/g, "").replace(/\n+/g, ". ").trim();
+  const clean = text.replace(/```[\s\S]*?```/g, "code block").replace(/[*_#`]/g, "").replace(/\n+/g, ". ").trim();
   if (!clean) return;
   try {
-    const res = await fetch(`${API}/tts`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: clean }),
-    });
+    const res = await fetch(`${API}/tts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: clean }) });
     if (!res.ok) throw new Error();
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -99,102 +95,55 @@ async function speakText(text: string, onEnd?: () => void) {
 // ─── PDF Export ───────────────────────────────────────────────────────────────
 
 async function exportMessageAsPdf(msg: Message) {
-  // Lazy-load jsPDF from CDN
   if (!(window as any).jspdf) {
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((res, rej) => {
       const s = document.createElement("script");
       s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
-      s.onload = () => resolve();
-      s.onerror = reject;
+      s.onload = () => res(); s.onerror = rej;
       document.head.appendChild(s);
     });
   }
   const { jsPDF } = (window as any).jspdf;
   const doc = new jsPDF({ unit: "pt", format: "a4" });
-  const margin = 48;
-  const pageW = doc.internal.pageSize.getWidth();
-  const maxW = pageW - margin * 2;
-
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(16);
-  doc.setTextColor(40, 40, 40);
-  doc.text("ZORO — Exported Message", margin, margin);
-
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(10);
-  doc.setTextColor(130, 120, 110);
-  const ts = msg.timestamp.toLocaleString();
-  const role = msg.role === "zoro" ? "ZORO" : "You";
-  doc.text(`${role} · ${ts}`, margin, margin + 20);
-
-  doc.setDrawColor(220, 210, 200);
-  doc.line(margin, margin + 30, pageW - margin, margin + 30);
-
-  // Strip markdown for plain text
-  const plainText = msg.text
-    .replace(/```[\s\S]*?```/g, "[code block]")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
-    .replace(/\*(.+?)\*/g, "$1")
-    .replace(/^[*-] /gm, "• ")
-    .replace(/#+\s/g, "");
-
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(12);
-  doc.setTextColor(30, 27, 23);
-  const lines = doc.splitTextToSize(plainText, maxW);
-  doc.text(lines, margin, margin + 52);
-
-  doc.setFontSize(9);
-  doc.setTextColor(160, 150, 140);
+  const margin = 52; const pageW = doc.internal.pageSize.getWidth();
+  doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.setTextColor(30, 27, 23);
+  doc.text("ZORO", margin, margin);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(130, 120, 110);
+  doc.text(`${msg.role === "zoro" ? "ZORO" : "You"} · ${msg.timestamp.toLocaleString()}`, margin, margin + 18);
+  doc.setDrawColor(200, 185, 165); doc.line(margin, margin + 28, pageW - margin, margin + 28);
+  const plain = msg.text.replace(/```[\s\S]*?```/g, "[code]").replace(/`([^`]+)`/g, "$1").replace(/\*\*(.+?)\*\*/g, "$1").replace(/\*(.+?)\*/g, "$1").replace(/^[*-] /gm, "• ").replace(/#+\s/g, "");
+  doc.setFontSize(12); doc.setTextColor(30, 27, 23);
+  const lines = doc.splitTextToSize(plain, pageW - margin * 2);
+  doc.text(lines, margin, margin + 48);
+  doc.setFontSize(9); doc.setTextColor(160, 150, 140);
   doc.text("Generated by ZORO", margin, doc.internal.pageSize.getHeight() - 28);
-
-  doc.save(`zoro-message-${Date.now()}.pdf`);
+  doc.save(`zoro-${Date.now()}.pdf`);
 }
 
-// ─── Chat Export ──────────────────────────────────────────────────────────────
-
 function exportChatAsTxt(messages: Message[], title: string) {
-  const lines = messages.map(m => {
-    const role = m.role === "zoro" ? "ZORO" : "You";
-    const ts = m.timestamp.toLocaleString();
-    return `[${role} · ${ts}]\n${m.text}\n`;
-  });
-  const blob = new Blob([`ZORO Chat — ${title}\n${"─".repeat(40)}\n\n${lines.join("\n")}`], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = `zoro-chat-${Date.now()}.txt`;
-  a.click(); URL.revokeObjectURL(url);
+  const content = `ZORO — ${title}\n${"─".repeat(44)}\n\n` + messages.map(m => `[${m.role === "zoro" ? "ZORO" : "You"} · ${m.timestamp.toLocaleString()}]\n${m.text}\n`).join("\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+  const a = document.createElement("a"); a.href = url; a.download = `zoro-chat-${Date.now()}.txt`; a.click(); URL.revokeObjectURL(url);
 }
 
 // ─── Markdown ─────────────────────────────────────────────────────────────────
 
-function renderMd(text: string, onPreview?: (code: string) => void) {
+function renderMd(text: string) {
   return text.replace(/\[System:[^\]]*\]/g, "").trim()
     .replace(/https:\/\/image\.pollinations\.ai\/prompt\/[^\s)]+/g, "")
     .replace(/```(\w*)\n?([\s\S]*?)```/g, (_: string, lang: string, c: string) => {
       const isWeb = ["html", "css", "js", "javascript"].includes(lang.toLowerCase());
       const clean = c.trim().replace(/&/g, "&amp;").replace(/</g, "&lt;");
-      return `
-        <div class="z-code-block" data-lang="${lang || 'code'}">
-          <div class="z-code-header">
-            <div class="z-code-dots"><span></span><span></span><span></span></div>
-            <span class="z-code-lang">${lang || 'code'}</span>
-            <div class="z-code-actions">
-              ${isWeb ? `<button class="z-code-btn z-preview-btn" data-code="${encodeURIComponent(c.trim())}">${Ico.sparkle} Preview</button>` : ""}
-              <button class="z-code-btn z-wrap-btn" data-code="${encodeURIComponent(c.trim())}">${Ico.wrap} Wrap</button>
-              <button class="z-code-btn z-copy-btn" data-code="${encodeURIComponent(c.trim())}">${Ico.copy} Copy</button>
-            </div>
-          </div>
-          <pre class="z-code"><code>${clean}</code></pre>
-        </div>
-      `;
+      return `<div class="z-code-block"><div class="z-code-header"><div class="z-code-dots"><span></span><span></span><span></span></div><span class="z-code-lang">${lang || "code"}</span><div class="z-code-actions">${isWeb ? `<button class="z-code-btn z-preview-btn" data-code="${encodeURIComponent(c.trim())}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg> Preview</button>` : ""}<button class="z-code-btn z-wrap-btn" data-code="${encodeURIComponent(c.trim())}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></button><button class="z-code-btn z-copy-btn" data-code="${encodeURIComponent(c.trim())}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button></div></div><pre class="z-pre"><code class="z-code-inner">${clean}</code></pre></div>`;
     })
     .replace(/`([^`]+)`/g, "<code class='z-ic'>$1</code>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/^### (.+)$/gm, "<h3 class='z-h3'>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2 class='z-h2'>$1</h2>")
+    .replace(/^> (.+)$/gm, "<blockquote class='z-bq'>$1</blockquote>")
     .replace(/^[*-] (.+)$/gm, "<li>$1</li>")
-    .replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>")
+    .replace(/(<li>[\s\S]*?<\/li>)/g, "<ul class='z-ul'>$1</ul>")
     .replace(/\n\n/g, "<br/><br/>")
     .replace(/\n/g, "<br/>");
 }
@@ -204,14 +153,12 @@ function renderMd(text: string, onPreview?: (code: string) => void) {
 function makeId() { return crypto.randomUUID(); }
 function isMob() { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || "ontouchstart" in window; }
 function chatTitle(msgs: Message[]) {
-  const f = msgs.find(m => m.role === "user");
-  if (!f) return "New chat";
-  const t = f.text || "image";
-  return t.length > 38 ? t.slice(0, 38) + "…" : t;
+  const f = msgs.find(m => m.role === "user"); if (!f) return "New chat";
+  return (f.text || "image").slice(0, 38) + (f.text?.length > 38 ? "…" : "");
 }
 function groupByDate(chats: Chat[]) {
-  const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yest = new Date(today.getTime() - 864e5); const week = new Date(today.getTime() - 6 * 864e5);
+  const now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yest = new Date(today.getTime() - 864e5), week = new Date(today.getTime() - 6 * 864e5);
   const g: Record<string, Chat[]> = { Today: [], Yesterday: [], "This week": [], Older: [] };
   for (const c of chats) {
     const d = new Date(c.createdAt.getFullYear(), c.createdAt.getMonth(), c.createdAt.getDate());
@@ -222,45 +169,77 @@ function groupByDate(chats: Chat[]) {
   }
   return Object.entries(g).filter(([, v]) => v.length).map(([label, items]) => ({ label, items }));
 }
+function hydrateTs(m: Message): Message {
+  return { ...m, timestamp: m.timestamp instanceof Date ? m.timestamp : new Date((m.timestamp as any)?.seconds ? (m.timestamp as any).seconds * 1000 : m.timestamp) };
+}
 
-// ─── SVG Icons ────────────────────────────────────────────────────────────────
+// ─── Magnetic Button ─────────────────────────────────────────────────────────
 
-const Ico = {
-  send: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2L11 13" /><path d="M22 2L15 22 11 13 2 9l20-7z" /></svg>,
-  mic: (f = false) => <svg width="16" height="16" viewBox="0 0 24 24" fill={f ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>,
-  img: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>,
-  x: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>,
-  refresh: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21v-5h5" /></svg>,
-  menu: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>,
-  plus: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>,
-  trash: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></svg>,
-  copy: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>,
-  check: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>,
-  pin: (f = false) => <svg width="13" height="13" viewBox="0 0 24 24" fill={f ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>,
-  brain: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.96-3 2.5 2.5 0 0 1-1.32-4.24 3 3 0 0 1 .34-5.58 2.5 2.5 0 0 1 1.96-3A2.5 2.5 0 0 1 9.5 2Z" /><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.96-3 2.5 2.5 0 0 0 1.32-4.24 3 3 0 0 0-.34-5.58 2.5 2.5 0 0 0-1.96-3A2.5 2.5 0 0 0 14.5 2Z" /></svg>,
-  settings: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>,
-  speaker: (on = false) => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />{on ? <><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></> : <line x1="23" y1="9" x2="17" y2="15" />}</svg>,
-  chat: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>,
-  clip: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>,
-  camera: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>,
-  download: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>,
-  external: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>,
-  sparkle: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L9.5 9.5 2 12l7.5 2.5L12 22l2.5-7.5L22 12l-7.5-2.5L12 2z" /></svg>,
-  pdf: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" /></svg>,
-  wrap: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg>,
-  exportChat: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>,
-};
+function MagneticBtn({ children, className, onClick, disabled, title, onPointerDown, strength = 0.35 }: {
+  children: React.ReactNode; className?: string; onClick?: (e: any) => void;
+  disabled?: boolean; title?: string; onPointerDown?: (e: any) => void; strength?: number;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const x = useMotionValue(0); const y = useMotionValue(0);
+  const sx = useSpring(x, { stiffness: 400, damping: 28 });
+  const sy = useSpring(y, { stiffness: 400, damping: 28 });
+  const handleMove = (e: React.PointerEvent) => {
+    if (disabled || !ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    x.set((e.clientX - r.left - r.width / 2) * strength);
+    y.set((e.clientY - r.top - r.height / 2) * strength);
+  };
+  const handleLeave = () => { x.set(0); y.set(0); };
+  return (
+    <motion.button ref={ref} className={className} onClick={onClick} disabled={disabled} title={title}
+      onPointerDown={onPointerDown} onPointerMove={handleMove} onPointerLeave={handleLeave}
+      style={{ x: sx, y: sy }}>
+      {children}
+    </motion.button>
+  );
+}
+
+// ─── Ambient Cursor Glow ─────────────────────────────────────────────────────
+
+function CursorGlow() {
+  const x = useMotionValue(-200); const y = useMotionValue(-200);
+  const sx = useSpring(x, { stiffness: 60, damping: 20 });
+  const sy = useSpring(y, { stiffness: 60, damping: 20 });
+  useEffect(() => {
+    const fn = (e: MouseEvent) => { x.set(e.clientX); y.set(e.clientY); };
+    window.addEventListener("mousemove", fn);
+    return () => window.removeEventListener("mousemove", fn);
+  }, []);
+  return (
+    <motion.div className="cursor-glow" style={{ left: sx, top: sy }} />
+  );
+}
+
+// ─── Typing Indicator ─────────────────────────────────────────────────────────
+
+function TypingDots() {
+  return (
+    <div className="typing">
+      {[0, 1, 2].map(i => (
+        <motion.span key={i}
+          animate={{ y: [0, -5, 0], opacity: [0.4, 1, 0.4] }}
+          transition={{ duration: 0.9, repeat: Infinity, delay: i * 0.15, ease: "easeInOut" }}
+        />
+      ))}
+    </div>
+  );
+}
 
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 
-function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }: {
+function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro, index }: {
   msg: Message; onPin: (id: string) => void;
   onSpeak: (text: string, id: string) => void;
   onRegenerate: (id: string) => void;
-  speaking: boolean; tts: boolean; isLastZoro: boolean;
+  speaking: boolean; tts: boolean; isLastZoro: boolean; index: number;
 }) {
   const [copied, setCopied] = useState(false);
-  const [imgCopied, setImgCopied] = useState(false);
+  const [hovering, setHovering] = useState(false);
   const isZ = msg.role === "zoro";
   const time = msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -268,81 +247,208 @@ function Bubble({ msg, onPin, onSpeak, onRegenerate, speaking, tts, isLastZoro }
     navigator.clipboard.writeText(msg.text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
   };
 
-  const copyLink = (url: string) => {
-    navigator.clipboard.writeText(url).then(() => { setImgCopied(true); setTimeout(() => setImgCopied(false), 1800); });
-  };
-
   const dlImg = async (url: string) => {
-    try {
-      const res = await fetch(url);
-      const blob = await res.blob();
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `zoro-${Date.now()}.jpg`;
-      link.click();
-    } catch (e) { console.error("Download failed", e); }
+    const res = await fetch(url); const blob = await res.blob();
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `zoro-${Date.now()}.jpg`; a.click();
   };
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 14, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.97 }}
-      transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94] }}
+      layout="position"
+      initial={{ opacity: 0, y: 20, filter: "blur(4px)" }}
+      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+      exit={{ opacity: 0, y: -10, filter: "blur(2px)" }}
+      transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1], delay: 0 }}
       className={`bubble-row ${isZ ? "z-row" : "u-row"}${msg.pinned ? " pinned" : ""}`}
+      onHoverStart={() => setHovering(true)}
+      onHoverEnd={() => setHovering(false)}
     >
-      <div className={`avatar ${isZ ? "z-av" : "u-av"}`}>
-        {isZ ? "Z" : "U"}
-      </div>
+      {isZ && (
+        <motion.div className="z-av"
+          initial={{ scale: 0, rotate: -10 }}
+          animate={{ scale: 1, rotate: 0 }}
+          transition={{ type: "spring", stiffness: 400, damping: 20, delay: 0.05 }}>
+          <span>Z</span>
+          {speaking && <div className="av-pulse" />}
+        </motion.div>
+      )}
+
       <div className={`bwrap ${isZ ? "z-wrap" : "u-wrap"}`}>
-        {msg.pinned && <span className="pin-tag">📌 pinned</span>}
+        {msg.pinned && (
+          <motion.span className="pin-tag" initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}>
+            📌 pinned
+          </motion.span>
+        )}
+
         <div className={`bubble ${isZ ? "z-bubble" : "u-bubble"}`}>
           {msg.status && (
-            <div className="b-status">
-              <span className="b-status-dot" />
-              {msg.status}
-            </div>
+            <motion.div className="b-status"
+              initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
+              <div className="b-status-ring" />
+              <span>{msg.status}</span>
+            </motion.div>
           )}
+
           {msg.image && (
-            <div className="bubble-img-container">
+            <motion.div className="bubble-img-container"
+              initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5, ease: [0.23, 1, 0.32, 1] }}>
               <img src={msg.image} alt="" className="b-img" />
               <div className="img-overlay">
-                <button className="img-btn" onClick={() => dlImg(msg.image!)} title="Download">{Ico.download}</button>
-                <button className="img-btn" onClick={() => copyLink(msg.image!)} title="Copy Link">{imgCopied ? Ico.check : Ico.external}</button>
+                <button className="img-btn" onClick={() => dlImg(msg.image!)} title="Download">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                </button>
+                <button className="img-btn" onClick={() => navigator.clipboard.writeText(msg.image!)} title="Copy URL">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+                </button>
               </div>
-            </div>
+            </motion.div>
           )}
+
           {msg.document && (
             <a href={msg.document.url} target="_blank" rel="noopener noreferrer" className="b-doc-card">
-              <span className="b-doc-ico">{Ico.clip}</span>
-              <span className="b-doc-name">{msg.document.name}</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
+              <span>{msg.document.name}</span>
             </a>
           )}
+
           {isZ
-            ? msg.text === ""
-              ? <div className="typing"><span /><span /><span /></div>
+            ? msg.text === "" ? <TypingDots />
               : <div className="z-md" dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }} />
-            : <span>{msg.text}</span>}
+            : <span className="u-text">{msg.text}</span>}
         </div>
-        <div className="bmeta">
-          <span className="btime">{time}</span>
-          <button className="bact" onClick={copy} title="Copy">{copied ? Ico.check : Ico.copy}</button>
-          <button className="bact" onClick={() => onPin(msg.id)} title="Pin">{Ico.pin(!!msg.pinned)}</button>
-          {isZ && msg.text && (
-            <button className="bact" onClick={() => exportMessageAsPdf(msg)} title="Export as PDF">{Ico.pdf}</button>
+
+        <AnimatePresence>
+          {(hovering || msg.pinned) && (
+            <motion.div className="bmeta"
+              initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 4 }}
+              transition={{ duration: 0.15 }}>
+              <span className="btime">{time}</span>
+              <div className="bacts">
+                <button className="bact" onClick={copy} title="Copy">
+                  {copied ? <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                    : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>}
+                </button>
+                <button className="bact" onClick={() => onPin(msg.id)} title="Pin">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill={msg.pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
+                </button>
+                {isZ && msg.text && (
+                  <button className="bact" onClick={() => exportMessageAsPdf(msg)} title="Export PDF">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></svg>
+                  </button>
+                )}
+                {isZ && isLastZoro && (
+                  <button className="bact" onClick={() => onRegenerate(msg.id)} title="Regenerate">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21v-5h5" /></svg>
+                  </button>
+                )}
+                {isZ && tts && msg.text && (
+                  <button className={`bact${speaking ? " bact-on" : ""}`} onClick={() => onSpeak(msg.text, msg.id)}>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />{speaking ? <><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></> : <line x1="23" y1="9" x2="17" y2="15" />}</svg>
+                  </button>
+                )}
+              </div>
+            </motion.div>
           )}
-          {isZ && isLastZoro && (
-            <button className="bact" onClick={() => onRegenerate(msg.id)} title="Regenerate">{Ico.refresh}</button>
+        </AnimatePresence>
+      </div>
+    </motion.div>
+  );
+}
+
+// ─── Input Box ────────────────────────────────────────────────────────────────
+
+function InputBox({ input, setInput, onSend, loading, isListening, startListen, stopListen, pendingImg, setPendingImg, pendingDoc, setPendingDoc, fileRef, docFileRef, cameraRef, mobile, isTempChat }: any) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [focused, setFocused] = useState(false);
+  const canSend = (input.trim().length > 0 || !!pendingImg || !!pendingDoc) && !loading;
+
+  useEffect(() => { const ta = taRef.current; if (!ta) return; ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 160) + "px"; }, [input]);
+
+  return (
+    <div className={`inp-shell${focused ? " inp-focused" : ""}`}>
+      {(pendingImg || pendingDoc) && (
+        <div className="attachments-row">
+          {pendingImg && (
+            <motion.div className="att-chip att-img" initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
+              <img src={pendingImg} alt="" />
+              <button className="att-rm" onPointerDown={e => { e.preventDefault(); setPendingImg(null); }}>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              </button>
+            </motion.div>
           )}
-          {isZ && tts && msg.text && (
-            <button className={`bact ${speaking ? "bact-on" : ""}`} onClick={() => onSpeak(msg.text, msg.id)}>
-              {Ico.speaker(speaking)}
+          {pendingDoc && (
+            <motion.div className="att-chip att-doc" initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+              <span className="att-doc-name">{pendingDoc.name}</span>
+              <button className="att-rm" onPointerDown={e => { e.preventDefault(); setPendingDoc(null); }}>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              </button>
+            </motion.div>
+          )}
+        </div>
+      )}
+
+      <div className="inp-row">
+        <div className="inp-tools">
+          <button className="inp-tool" onPointerDown={e => { e.preventDefault(); docFileRef.current?.click(); }} disabled={loading} title="Attach document">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
+          </button>
+          <button className="inp-tool" onPointerDown={e => { e.preventDefault(); fileRef.current?.click(); }} disabled={loading} title="Image">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+          </button>
+          {mobile && (
+            <button className="inp-tool" onPointerDown={e => { e.preventDefault(); cameraRef.current?.click(); }} disabled={loading} title="Camera">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
             </button>
           )}
         </div>
+
+        <textarea
+          ref={taRef}
+          className="inp-ta"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (!mobile && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder={isListening ? "Listening…" : isTempChat ? "Temporary chat — nothing saved…" : "Ask anything…"}
+          disabled={loading}
+          rows={1}
+          autoCapitalize="sentences"
+          spellCheck
+        />
+
+        <div className="inp-right">
+          <motion.button
+            className={`mic-btn${isListening ? " mic-live" : ""}`}
+            onPointerDown={e => { e.preventDefault(); isListening ? stopListen() : startListen(); }}
+            disabled={loading}
+            whileTap={{ scale: 0.88 }}
+          >
+            {isListening
+              ? <motion.div className="mic-wave" animate={{ scaleY: [1, 1.6, 1, 1.3, 1] }} transition={{ duration: 0.8, repeat: Infinity }} />
+              : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>}
+          </motion.button>
+
+          <motion.button
+            className="send-btn"
+            onPointerDown={e => { e.preventDefault(); onSend(); }}
+            disabled={!canSend}
+            whileHover={canSend ? { scale: 1.06 } : {}}
+            whileTap={canSend ? { scale: 0.9 } : {}}
+            animate={canSend ? { opacity: 1 } : { opacity: 0.3 }}
+            transition={{ duration: 0.15 }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 2L11 13" /><path d="M22 2L15 22 11 13 2 9l20-7z" />
+            </svg>
+          </motion.button>
+        </div>
       </div>
-    </motion.div>
+
+      <div className={`inp-border-glow${focused ? " inp-border-active" : ""}`} />
+    </div>
   );
 }
 
@@ -356,15 +462,13 @@ function VoiceMode({ memory, settings }: { memory: string[]; settings: Settings 
   const [err, setErr] = useState("");
   const [speakId, setSpeakId] = useState<string | null>(null);
   const recRef = useRef<any>(null);
+  const orbScale = useSpring(1, { stiffness: 200, damping: 20 });
 
   const send = useCallback(async (text: string) => {
     if (!text.trim()) return;
     setProcessing(true); setErr(""); setResponse("");
     try {
-      const res = await fetch(`${API}/stream`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, history: [], memory }),
-      });
+      const res = await fetch(`${API}/stream`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, history: [], memory }) });
       const reader = res.body!.getReader(); const dec = new TextDecoder();
       let buf = "", full = "";
       while (true) {
@@ -373,85 +477,94 @@ function VoiceMode({ memory, settings }: { memory: string[]; settings: Settings 
         const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-          try {
-            const p = JSON.parse(line.slice(6));
-            if (p.token) { full += p.token; setResponse(full.replace(/\[System:[^\]]*\]/g, "").trim()); }
-            if (p.done && settings.soundEnabled) playDone();
-          } catch { }
+          try { const p = JSON.parse(line.slice(6)); if (p.token) { full += p.token; setResponse(full.replace(/\[System:[^\]]*\]/g, "").trim()); } if (p.done && settings.soundEnabled) playDone(); } catch { }
         }
       }
-      if (settings.ttsEnabled && full) {
-        const id = makeId(); setSpeakId(id);
-        speakText(full, () => setSpeakId(null));
-      }
+      if (settings.ttsEnabled && full) { const id = makeId(); setSpeakId(id); speakText(full, () => setSpeakId(null)); }
     } catch { setErr("Can't reach ZORO — is the backend running?"); }
     setProcessing(false);
   }, [memory, settings]);
 
   const startListen = () => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setErr("Voice not supported in this browser. Try Chrome."); return; }
+    if (!SR) { setErr("Voice not supported. Try Chrome."); return; }
     setTranscript(""); setResponse(""); setErr(""); stopSpeaking(); setSpeakId(null);
     const r = new SR(); r.continuous = false; r.interimResults = true; r.lang = "en-IN";
-    r.onstart = () => setListening(true);
+    r.onstart = () => { setListening(true); orbScale.set(1.1); };
     r.onresult = (e: any) => setTranscript(Array.from(e.results).map((x: any) => x[0].transcript).join(""));
-    r.onend = () => { setListening(false); setTimeout(() => { setTranscript(t => { if (t.trim()) send(t); return t; }); }, 200); };
-    r.onerror = () => setListening(false);
+    r.onend = () => { setListening(false); orbScale.set(1); setTimeout(() => { setTranscript(t => { if (t.trim()) send(t); return t; }); }, 200); };
+    r.onerror = () => { setListening(false); orbScale.set(1); };
     recRef.current = r; r.start();
   };
-
-  const stopListen = () => { recRef.current?.stop(); setListening(false); };
+  const stopListen = () => { recRef.current?.stop(); setListening(false); orbScale.set(1); };
 
   return (
     <div className="voice-shell">
-      <div className="orb-area">
-        {listening && [0, 1, 2].map(i => (
-          <motion.div key={i} className="orb-ring"
-            initial={{ scale: 1, opacity: 0.4 - i * 0.1 }}
-            animate={{ scale: 2.2 + i * 0.5, opacity: 0 }}
-            transition={{ duration: 1.8, repeat: Infinity, delay: i * 0.35, ease: "easeOut" }}
-          />
-        ))}
+      <div className="orb-stage">
+        {listening && (
+          <>
+            {[0, 1, 2, 3].map(i => (
+              <motion.div key={i} className="orb-ripple"
+                initial={{ scale: 1, opacity: 0.5 }}
+                animate={{ scale: 3 + i * 0.6, opacity: 0 }}
+                transition={{ duration: 2.4, repeat: Infinity, delay: i * 0.4, ease: "easeOut" }}
+              />
+            ))}
+          </>
+        )}
         <motion.button
-          className={`orb${listening ? " orb-live" : ""}${processing ? " orb-wait" : ""}`}
+          className={`orb${listening ? " orb-live" : ""}${processing ? " orb-proc" : ""}`}
           onClick={listening ? stopListen : startListen}
           disabled={processing}
-          whileHover={!processing ? { scale: 1.06 } : {}}
+          style={{ scale: orbScale }}
+          whileHover={!processing ? { scale: 1.07 } : {}}
           whileTap={!processing ? { scale: 0.93 } : {}}
         >
-          {processing
-            ? <motion.div className="orb-spin" animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} />
-            : Ico.mic(listening)
-          }
+          {processing ? (
+            <motion.div className="orb-spinner" animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }} />
+          ) : listening ? (
+            <div className="orb-bars">
+              {[0, 1, 2, 3, 4].map(i => (
+                <motion.span key={i}
+                  animate={{ scaleY: [0.4, 1, 0.4] }}
+                  transition={{ duration: 0.6 + i * 0.08, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
+                />
+              ))}
+            </div>
+          ) : (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>
+          )}
         </motion.button>
       </div>
 
       <motion.p className="orb-label"
-        key={listening ? "l" : processing ? "p" : "i"}
-        initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
+        key={`${listening}-${processing}`}
+        initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+        transition={{ duration: 0.2 }}>
         {processing ? "thinking…" : listening ? "listening…" : "tap to speak"}
       </motion.p>
 
       <div className="voice-cards">
         <AnimatePresence mode="wait">
           {(transcript || err) && (
-            <motion.div className={`vcard you-card${err ? " err-card" : ""}`}
-              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <span className="vc-who">you</span>
-              <p className="vc-text">{err || `"${transcript}"`}</p>
+            <motion.div className={`vcard you-vcard${err ? " err-vcard" : ""}`}
+              initial={{ opacity: 0, y: 12, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}>
+              <span className="vc-label">you</span>
+              <p className="vc-text">{err || transcript}</p>
             </motion.div>
           )}
         </AnimatePresence>
         <AnimatePresence mode="wait">
           {response && (
             <motion.div className="vcard z-vcard"
-              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <div className="vc-head">
-                <span className="vc-who zvc-who">zoro</span>
+              initial={{ opacity: 0, y: 12, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}>
+              <div className="vc-hd">
+                <span className="vc-label vc-z">zoro</span>
                 {settings.ttsEnabled && (
-                  <button className={`bact ${speakId ? "bact-on" : ""}`}
-                    onClick={() => speakId ? (stopSpeaking(), setSpeakId(null)) : speakText(response, () => setSpeakId(null)) || setSpeakId("1")}>
-                    {Ico.speaker(!!speakId)}
+                  <button className={`bact${speakId ? " bact-on" : ""}`} onClick={() => speakId ? (stopSpeaking(), setSpeakId(null)) : speakText(response, () => setSpeakId(null)) || setSpeakId("1")}>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />{speakId ? <><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></> : <line x1="23" y1="9" x2="17" y2="15" />}</svg>
                   </button>
                 )}
               </div>
@@ -466,66 +579,92 @@ function VoiceMode({ memory, settings }: { memory: string[]; settings: Settings 
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function Sidebar({ chats, activeChatId, onLoad, onDelete, onNew, onClose, user, onExportChat, messages }: {
-  chats: Chat[]; activeChatId: string | null;
-  onLoad: (c: Chat) => void; onDelete: (id: string) => void;
-  onNew: () => void; onClose: () => void; user: any;
-  onExportChat: () => void; messages: Message[];
-}) {
+function Sidebar({ chats, activeChatId, onLoad, onDelete, onNew, onClose, user, onExportChat, messages }: any) {
   const grouped = groupByDate(chats);
   const displayName = user?.displayName || user?.email?.split("@")[0] || "User";
   const initial = displayName[0].toUpperCase();
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   return (
     <div className="sb">
-      <div className="sb-top">
-        <div className="sb-brand">
-          <div className="sb-dot" />
+      <div className="sb-hd">
+        <div className="sb-logo">
+          <motion.div className="sb-logo-dot"
+            animate={{ scale: [1, 1.15, 1], opacity: [1, 0.7, 1] }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+          />
           <span>ZORO</span>
         </div>
-        <button className="ib" onClick={onClose}>{Ico.x(13)}</button>
-      </div>
-      <button className="sb-new" onClick={onNew}>
-        <span className="sb-new-ico">{Ico.plus}</span>
-        <span>New chat</span>
-      </button>
-      {messages.length > 0 && (
-        <button className="sb-export" onClick={onExportChat}>
-          <span className="sb-new-ico">{Ico.exportChat}</span>
-          <span>Export chat (.txt)</span>
+        <button className="ib sb-close" onClick={onClose}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
         </button>
-      )}
+      </div>
+
+      <div className="sb-actions">
+        <motion.button className="sb-new" onClick={onNew} whileHover={{ x: 2 }} whileTap={{ scale: 0.97 }}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+          <span>New chat</span>
+        </motion.button>
+        {messages.length > 0 && (
+          <motion.button className="sb-export-btn" onClick={onExportChat} whileHover={{ x: 2 }} whileTap={{ scale: 0.97 }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+            <span>Export chat</span>
+          </motion.button>
+        )}
+      </div>
+
       <div className="sb-list">
-        {chats.length === 0
-          ? (
-            <div className="sb-empty-state">
-              <div className="sb-empty-icon">💬</div>
-              <p className="sb-empty">No chats yet.</p>
-              <p className="sb-empty-sub">Start a conversation to see it here.</p>
-            </div>
-          )
-          : grouped.map(({ label, items }) => (
-            <div key={label}>
+        <AnimatePresence>
+          {chats.length === 0 ? (
+            <motion.div className="sb-empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <div className="sb-empty-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+              </div>
+              <p>No chats yet</p>
+              <span>Start a conversation</span>
+            </motion.div>
+          ) : grouped.map(({ label, items }) => (
+            <div key={label} className="sb-group">
               <p className="sb-gl">{label}</p>
-              {items.map(chat => (
-                <div key={chat.id} className={`sb-item${chat.id === activeChatId ? " sb-active" : ""}`}
-                  onClick={() => onLoad(chat)}>
-                  <div className="sb-i-ico">{Ico.chat}</div>
+              {items.map((chat: Chat, i: number) => (
+                <motion.div
+                  key={chat.id}
+                  className={`sb-item${chat.id === activeChatId ? " sb-active" : ""}`}
+                  onClick={() => onLoad(chat)}
+                  onHoverStart={() => setHoveredId(chat.id)}
+                  onHoverEnd={() => setHoveredId(null)}
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.03 }}
+                  layout
+                >
+                  <div className="sb-i-ico">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                  </div>
                   <span className="sb-i-title">{chat.title}</span>
-                  <button className="sb-del" onClick={e => { e.stopPropagation(); onDelete(chat.id); }}>
-                    {Ico.trash}
-                  </button>
-                </div>
+                  <AnimatePresence>
+                    {hoveredId === chat.id && (
+                      <motion.button
+                        className="sb-del"
+                        initial={{ opacity: 0, scale: 0.7 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.7 }}
+                        onClick={e => { e.stopPropagation(); onDelete(chat.id); }}
+                        whileTap={{ scale: 0.85 }}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
+                      </motion.button>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
               ))}
             </div>
           ))}
+        </AnimatePresence>
       </div>
+
       {user && (
-        <div className="sb-user">
+        <div className="sb-foot">
           <div className="sb-user-av">
-            {user.photoURL
-              ? <img src={user.photoURL} alt="" className="sb-user-av-img" referrerPolicy="no-referrer" />
-              : <span>{initial}</span>}
+            {user.photoURL ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" /> : <span>{initial}</span>}
           </div>
           <div className="sb-user-info">
             <span className="sb-user-name">{displayName}</span>
@@ -537,132 +676,176 @@ function Sidebar({ chats, activeChatId, onLoad, onDelete, onNew, onClose, user, 
   );
 }
 
-// ─── Memory Panel ─────────────────────────────────────────────────────────────
+// ─── Settings / Profile Dropdown ──────────────────────────────────────────────
 
-function MemPanel({ memory, onAdd, onDel, onClose }: {
-  memory: string[]; onAdd: (s: string) => void; onDel: (i: number) => void; onClose: () => void;
-}) {
-  const [val, setVal] = useState("");
-  return (
-    <div className="panel">
-      <div className="panel-hd">
-        <span className="panel-title">{Ico.brain} Memory</span>
-        <button className="ib" onClick={onClose}>{Ico.x(12)}</button>
-      </div>
-      <p className="panel-hint">Things ZORO always remembers about you.</p>
-      <div className="mem-list">
-        {memory.length === 0 && <p className="mem-empty">Nothing saved yet.</p>}
-        {memory.map((item, i) => (
-          <div key={i} className="mem-item">
-            <span className="mem-text">{item}</span>
-            <button className="mem-del" onClick={() => onDel(i)}>{Ico.x(10)}</button>
-          </div>
-        ))}
-      </div>
-      <div className="panel-inp-row">
-        <input className="panel-inp" value={val} onChange={e => setVal(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && val.trim() && (onAdd(val.trim()), setVal(""))}
-          placeholder="e.g. my name is Arjun" />
-        <button className="panel-add" onClick={() => val.trim() && (onAdd(val.trim()), setVal(""))}>Add</button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Profile Dropdown ─────────────────────────────────────────────────────────
-
-function ProfileDropdown({ user, settings, onChange, onOpenMemory, onClose, onSignOut, isTempChat, onToggleTemp, onNewChat }: {
-  user: any; settings: Settings; onChange: (s: Settings) => void;
-  onOpenMemory: () => void; onClose: () => void; onSignOut: () => void;
-  isTempChat: boolean; onToggleTemp: () => void; onNewChat: () => void;
-}) {
+function ProfileDrop({ user, onClose, onNewChat, onOpenMemory, onSignOut, isTempChat, onToggleTemp }: any) {
   const displayName = user?.displayName || user?.email?.split("@")[0] || "User";
-  const email = user?.email || "";
   const initial = displayName[0].toUpperCase();
-
   return (
-    <div className="prof-drop">
-      <div className="prof-user">
-        <div className="prof-av">
-          {user?.photoURL
-            ? <img src={user.photoURL} alt="" className="prof-av-img" referrerPolicy="no-referrer" />
-            : <span>{initial}</span>}
+    <div className="drop">
+      <div className="drop-user">
+        <div className="drop-av">
+          {user?.photoURL ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" /> : <span>{initial}</span>}
         </div>
-        <div className="prof-info">
-          <span className="prof-name">{displayName}</span>
-          {email && <span className="prof-email">{email}</span>}
+        <div className="drop-info">
+          <span className="drop-name">{displayName}</span>
+          {user?.email && <span className="drop-email">{user.email}</span>}
         </div>
-        <button className="ib" onClick={onClose}>{Ico.x(12)}</button>
+        <button className="ib" onClick={onClose}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
       </div>
-
-      <div className="prof-divider" />
-
-      <div className="prof-section-label">Actions</div>
-      <button className="prof-action" onClick={() => { onNewChat(); onClose(); }}>
-        <span className="prof-action-ico">{Ico.plus}</span>
-        <div className="prof-action-info">
-          <span className="prof-action-label">New chat</span>
-          <span className="prof-action-desc">Start a fresh conversation</span>
+      <div className="drop-divider" />
+      {[
+        { icon: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>, label: "New chat", desc: "Start fresh", action: () => { onNewChat(); onClose(); } },
+        { icon: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.96-3 2.5 2.5 0 0 1-1.32-4.24 3 3 0 0 1 .34-5.58 2.5 2.5 0 0 1 1.96-3A2.5 2.5 0 0 1 9.5 2Z" /><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.96-3 2.5 2.5 0 0 0 1.32-4.24 3 3 0 0 0-.34-5.58 2.5 2.5 0 0 0-1.96-3A2.5 2.5 0 0 0 14.5 2Z" /></svg>, label: "Memory", desc: "What ZORO knows", action: () => { onOpenMemory(); onClose(); } },
+      ].map(item => (
+        <button key={item.label} className="drop-action" onClick={item.action}>
+          <span className="drop-action-ico">{item.icon}</span>
+          <div className="drop-action-info"><span className="drop-action-label">{item.label}</span><span className="drop-action-desc">{item.desc}</span></div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>
+      ))}
+      <div className="drop-divider" />
+      <label className="drop-toggle-row">
+        <div className="drop-toggle-info">
+          <span className="drop-toggle-label">Temporary chat</span>
+          <span className="drop-toggle-desc">Nothing saved to history</span>
         </div>
-        <span className="prof-action-arr">›</span>
-      </button>
-      <button className="prof-action" onClick={() => { onOpenMemory(); onClose(); }}>
-        <span className="prof-action-ico">{Ico.brain}</span>
-        <div className="prof-action-info">
-          <span className="prof-action-label">Memory</span>
-          <span className="prof-action-desc">Things ZORO remembers about you</span>
-        </div>
-        <span className="prof-action-arr">›</span>
-      </button>
-
-      <div className="prof-divider" />
-
-      <label className="set-row temp-row">
-        <div className="set-info">
-          <span className="set-label"><span className="set-icon">🕵️</span>Temporary chat</span>
-          <span className="set-desc">No history or memory saved</span>
-        </div>
-        <div className={`tog${isTempChat ? " tog-on" : ""}`} onClick={onToggleTemp}>
-          <div className="tog-thumb" />
-        </div>
+        <div className={`tog${isTempChat ? " tog-on" : ""}`} onClick={onToggleTemp}><div className="tog-thumb" /></div>
       </label>
-
-      <div className="prof-divider" />
-
-      <div className="set-signout-wrap">
-        <button className="set-signout" onClick={onSignOut}>Sign out</button>
-      </div>
+      <div className="drop-divider" />
+      <div className="drop-signout-wrap"><button className="drop-signout" onClick={onSignOut}>Sign out</button></div>
     </div>
   );
 }
 
-function SettingsDropdown({ settings, onChange, onClose }: { settings: Settings; onChange: (s: Settings) => void; onClose: () => void; }) {
-  const settingRows: { key: keyof Settings; label: string; desc: string; icon: string }[] = [
-    { key: "soundEnabled", label: "Completion chime", desc: "Soft sound when ZORO finishes", icon: "🔔" },
-    { key: "ttsEnabled", label: "Voice replies", desc: "Read responses aloud via ElevenLabs", icon: "🎙️" },
-    { key: "storeHistory", label: "Save history", desc: "Sync chats to the cloud", icon: "☁️" },
+function SettingsDrop({ settings, onChange, onClose }: any) {
+  const rows = [
+    { key: "soundEnabled", label: "Completion chime", desc: "Sound when ZORO finishes", icon: "🔔" },
+    { key: "ttsEnabled", label: "Voice replies", desc: "Read responses aloud", icon: "🎙️" },
+    { key: "storeHistory", label: "Save history", desc: "Sync chats to cloud", icon: "☁️" },
     { key: "darkMode", label: "Dark mode", desc: "Switch to dark theme", icon: "🌙" },
   ];
   return (
-    <div className="prof-drop">
-      <div className="prof-user">
-        <div className="prof-info"><span className="prof-name">Settings</span></div>
-        <button className="ib" onClick={onClose}>{Ico.x(12)}</button>
+    <div className="drop">
+      <div className="drop-user" style={{ paddingBottom: 14 }}>
+        <div className="drop-info"><span className="drop-name">Settings</span></div>
+        <button className="ib" onClick={onClose}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
       </div>
-      <div className="prof-divider" />
-      <div className="set-list">
-        {settingRows.map(({ key, label, desc, icon }) => (
-          <label key={key} className="set-row">
-            <div className="set-info">
-              <span className="set-label"><span className="set-icon">{icon}</span>{label}</span>
-              <span className="set-desc">{desc}</span>
-            </div>
-            <div className={`tog${settings[key] ? " tog-on" : ""}`} onClick={() => onChange({ ...settings, [key]: !settings[key] })}>
-              <div className="tog-thumb" />
-            </div>
-          </label>
+      <div className="drop-divider" />
+      {rows.map(({ key, label, desc, icon }) => (
+        <label key={key} className="drop-toggle-row" style={{ borderBottom: "1px solid var(--border)" }}>
+          <div className="drop-toggle-info">
+            <span className="drop-toggle-label"><span style={{ marginRight: 7 }}>{icon}</span>{label}</span>
+            <span className="drop-toggle-desc">{desc}</span>
+          </div>
+          <div className={`tog${settings[key] ? " tog-on" : ""}`} onClick={() => onChange({ ...settings, [key]: !settings[key] })}><div className="tog-thumb" /></div>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function MemPanel({ memory, onAdd, onDel, onClose }: any) {
+  const [val, setVal] = useState("");
+  return (
+    <div className="drop">
+      <div className="drop-user" style={{ paddingBottom: 14 }}>
+        <div className="drop-info"><span className="drop-name">Memory</span><span className="drop-email">Things ZORO always knows</span></div>
+        <button className="ib" onClick={onClose}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
+      </div>
+      <div className="drop-divider" />
+      <div className="mem-scroll">
+        <AnimatePresence>
+          {memory.length === 0 && <motion.p className="mem-empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>Nothing saved yet.</motion.p>}
+          {memory.map((item: string, i: number) => (
+            <motion.div key={i} className="mem-item" initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} layout>
+              <span>{item}</span>
+              <button className="mem-del" onClick={() => onDel(i)}><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg></button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+      <div className="mem-add-row">
+        <input className="mem-inp" value={val} onChange={e => setVal(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && val.trim() && (onAdd(val.trim()), setVal(""))}
+          placeholder="e.g. I'm vegetarian" />
+        <button className="mem-add-btn" onClick={() => val.trim() && (onAdd(val.trim()), setVal(""))}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Welcome / Empty State ────────────────────────────────────────────────────
+
+function EmptyState({ firstName, input, setInput, onSend, loading, isListening, startListen, stopListen, pendingImg, setPendingImg, pendingDoc, setPendingDoc, fileRef, docFileRef, cameraRef, mobile, isTempChat }: any) {
+  const [activeChip, setActiveChip] = useState<number | null>(null);
+
+  return (
+    <div className="empty-root">
+      <CursorGlow />
+
+      <motion.div className="welcome-block"
+        initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, ease: [0.23, 1, 0.32, 1] }}>
+
+        <motion.div className="welcome-icon"
+          animate={{ rotate: [0, 5, -5, 0] }}
+          transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}>
+          <div className="wi-core" />
+          <div className="wi-ring" />
+        </motion.div>
+
+        <motion.h1 className="welcome-h"
+          initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1, duration: 0.5, ease: [0.23, 1, 0.32, 1] }}>
+          Hey, {firstName}
+        </motion.h1>
+        <motion.p className="welcome-sub"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+          transition={{ delay: 0.2, duration: 0.5 }}>
+          What are we building today?
+        </motion.p>
+      </motion.div>
+
+      <motion.div className="empty-input-wrap"
+        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.25, duration: 0.5, ease: [0.23, 1, 0.32, 1] }}>
+        <InputBox
+          input={input} setInput={setInput} onSend={onSend} loading={loading}
+          isListening={isListening} startListen={startListen} stopListen={stopListen}
+          pendingImg={pendingImg} setPendingImg={setPendingImg}
+          pendingDoc={pendingDoc} setPendingDoc={setPendingDoc}
+          fileRef={fileRef} docFileRef={docFileRef} cameraRef={cameraRef}
+          mobile={mobile} isTempChat={isTempChat}
+        />
+        <p className="empty-hint">{mobile ? "Tap send or mic" : "↵ send · ⇧↵ newline · or just tap mic"}</p>
+      </motion.div>
+
+      <motion.div className="chips-wrap"
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+        transition={{ delay: 0.38, duration: 0.4 }}>
+        {SUGGESTIONS.map((s, i) => (
+          <motion.button
+            key={s.label}
+            className={`chip${activeChip === i ? " chip-active" : ""}`}
+            initial={{ opacity: 0, y: 14, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ delay: 0.4 + i * 0.055, duration: 0.35, ease: [0.23, 1, 0.32, 1] }}
+            whileHover={{ y: -2, scale: 1.03 }}
+            whileTap={{ scale: 0.96 }}
+            onHoverStart={() => setActiveChip(i)}
+            onHoverEnd={() => setActiveChip(null)}
+            onClick={() => setInput(s.prompt)}
+          >
+            <span className="chip-glyph">{s.icon}</span>
+            <span className="chip-label">{s.label}</span>
+            <motion.div className="chip-shine"
+              animate={activeChip === i ? { x: ["0%", "120%"] } : { x: "0%" }}
+              transition={{ duration: 0.5, ease: "easeOut" }}
+            />
+          </motion.button>
         ))}
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -672,7 +855,6 @@ function SettingsDropdown({ settings, onChange, onClose }: { settings: Settings;
 export default function Index() {
   const { user, signOut } = useAuth();
   const uid = user?.uid || "";
-
   const firstName = user?.displayName?.split(" ")[0] || user?.email?.split("@")[0] || "there";
 
   const [mode, setMode] = useState<Mode>("chat");
@@ -697,7 +879,6 @@ export default function Index() {
   const [mobile] = useState(isMob);
 
   const bottomRef = useRef<HTMLDivElement>(null);
-  const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const docFileRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
@@ -705,74 +886,32 @@ export default function Index() {
   const sbRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-  useEffect(() => { const ta = taRef.current; if (!ta) return; ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 150) + "px"; }, [input]);
 
-  // ── FIX: Load data + restore active chat atomically ──────────────────────
+  // ── Load + restore active chat ─────────────────────────────────────────────
   useEffect(() => {
     if (!uid) return;
     let cancelled = false;
     (async () => {
       const [loadedChats, m, s] = await Promise.all([floadChats(uid), floadMemory(uid), loadUserSettings(uid)]);
       if (cancelled) return;
-      setChats(loadedChats);
-      setMemory(m);
-      setSettings(s);
-      setDataLoaded(true);
-
-      // Restore active chat — read localStorage *after* chats are loaded
-      // so the find() actually has data to search through
+      setChats(loadedChats); setMemory(m); setSettings(s); setDataLoaded(true);
       const savedId = localStorage.getItem(`zoro_active_chat_${uid}`);
       if (savedId) {
-        const active = loadedChats.find(c => c.id === savedId);
-        if (active) {
-          setActiveChatId(active.id);
-          // Re-hydrate timestamps (Firestore returns plain objects)
-          const hydratedMsgs = active.messages.map(m => ({
-            ...m,
-            timestamp: m.timestamp instanceof Date ? m.timestamp : new Date((m.timestamp as any)?.seconds ? (m.timestamp as any).seconds * 1000 : m.timestamp),
-          }));
-          setMessages(hydratedMsgs);
-        }
+        const active = loadedChats.find((c: Chat) => c.id === savedId);
+        if (active) { setActiveChatId(active.id); setMessages(active.messages.map(hydrateTs)); }
       }
     })();
     return () => { cancelled = true; };
   }, [uid]);
 
   useEffect(() => { document.documentElement.classList.toggle("dark", settings.darkMode); }, [settings.darkMode]);
+  useEffect(() => { if (!uid || !dataLoaded) return; const t = setTimeout(() => fsaveMemory(uid, memory), 600); return () => clearTimeout(t); }, [memory, uid, dataLoaded]);
+  useEffect(() => { if (!uid || !dataLoaded) return; const t = setTimeout(() => saveUserSettings(uid, settings), 600); return () => clearTimeout(t); }, [settings, uid, dataLoaded]);
 
-  useEffect(() => {
-    if (!uid || !dataLoaded) return;
-    const t = setTimeout(() => fsaveMemory(uid, memory), 600);
-    return () => clearTimeout(t);
-  }, [memory, uid, dataLoaded]);
-
-  useEffect(() => {
-    if (!uid || !dataLoaded) return;
-    const t = setTimeout(() => saveUserSettings(uid, settings), 600);
-    return () => clearTimeout(t);
-  }, [settings, uid, dataLoaded]);
-
-  useEffect(() => {
-    const fn = (e: MouseEvent) => {
-      if (sidebarOpen && sbRef.current && !sbRef.current.contains(e.target as Node)) setSidebarOpen(false);
-      const t = e.target as HTMLElement;
-      if (!t.closest('.prof-panel-wrap') && !t.closest('.hdr-r')) {
-        setShowProfile(false);
-        setShowSettings(false);
-      }
-    };
-    document.addEventListener("mousedown", fn);
-    return () => document.removeEventListener("mousedown", fn);
-  }, [sidebarOpen]);
-
-  // ── FIX: Persist activeChatId to localStorage reliably ───────────────────
   useEffect(() => {
     if (!uid) return;
-    if (activeChatId) {
-      localStorage.setItem(`zoro_active_chat_${uid}`, activeChatId);
-    } else {
-      localStorage.removeItem(`zoro_active_chat_${uid}`);
-    }
+    if (activeChatId) localStorage.setItem(`zoro_active_chat_${uid}`, activeChatId);
+    else localStorage.removeItem(`zoro_active_chat_${uid}`);
   }, [activeChatId, uid]);
 
   useEffect(() => {
@@ -780,91 +919,49 @@ export default function Index() {
     setChats(prev => {
       if (activeChatId) {
         const updated = prev.map(c => c.id === activeChatId ? { ...c, messages, title: chatTitle(messages) } : c);
-        const chat = updated.find(c => c.id === activeChatId);
-        if (chat) fsaveChat(uid, chat);
+        const chat = updated.find(c => c.id === activeChatId); if (chat) fsaveChat(uid, chat);
         return updated;
       }
       const nc: Chat = { id: makeId(), title: chatTitle(messages), messages, createdAt: new Date() };
-      setActiveChatId(nc.id);
-      fsaveChat(uid, nc);
-      return [nc, ...prev];
+      setActiveChatId(nc.id); fsaveChat(uid, nc); return [nc, ...prev];
     });
   }, [messages, settings.storeHistory, isTempChat]);
 
   useEffect(() => {
     const fn = (e: ClipboardEvent) => {
       for (const item of e.clipboardData?.items || []) {
-        if (item.type.startsWith("image/")) {
-          const f = item.getAsFile(); if (!f) continue;
-          const r = new FileReader(); r.onload = () => setPendingImg(r.result as string); r.readAsDataURL(f); break;
-        }
+        if (item.type.startsWith("image/")) { const f = item.getAsFile(); if (!f) continue; const r = new FileReader(); r.onload = () => setPendingImg(r.result as string); r.readAsDataURL(f); break; }
       }
     };
     window.addEventListener("paste", fn); return () => window.removeEventListener("paste", fn);
   }, []);
 
-  // Event delegation for code block buttons
   useEffect(() => {
-    const handle = (e: MouseEvent) => {
-      const btn = (e.target as HTMLElement).closest(".z-code-btn");
-      if (!btn) return;
+    const fn = (e: MouseEvent) => {
+      if (sidebarOpen && sbRef.current && !sbRef.current.contains(e.target as Node)) setSidebarOpen(false);
+      const t = e.target as HTMLElement;
+      if (!t.closest(".drop-wrap") && !t.closest(".hdr-r")) { setShowProfile(false); setShowSettings(false); setShowMem(false); }
+    };
+    document.addEventListener("mousedown", fn);
+    return () => document.removeEventListener("mousedown", fn);
+  }, [sidebarOpen]);
+
+  // Code block delegation
+  useEffect(() => {
+    const fn = (e: MouseEvent) => {
+      const btn = (e.target as HTMLElement).closest(".z-code-btn"); if (!btn) return;
       const code = decodeURIComponent(btn.getAttribute("data-code") || "");
       if (btn.classList.contains("z-copy-btn")) {
-        navigator.clipboard.writeText(code).then(() => {
-          const original = btn.innerHTML;
-          btn.innerHTML = `✓ Copied`;
-          btn.classList.add("z-btn-success");
-          setTimeout(() => { btn.innerHTML = original; btn.classList.remove("z-btn-success"); }, 2000);
-        });
-      } else if (btn.classList.contains("z-preview-btn")) {
-        setPreviewCode(code);
-      } else if (btn.classList.contains("z-wrap-btn")) {
-        // Toggle word-wrap on the nearest <pre>
-        const block = btn.closest(".z-code-block");
-        const pre = block?.querySelector("pre.z-code") as HTMLElement | null;
-        if (pre) {
-          const isWrapped = pre.style.whiteSpace === "pre-wrap";
-          pre.style.whiteSpace = isWrapped ? "" : "pre-wrap";
-          pre.style.overflowX = isWrapped ? "" : "hidden";
-          btn.classList.toggle("z-btn-active", !isWrapped);
-        }
-      }
+        navigator.clipboard.writeText(code).then(() => { btn.innerHTML = "✓ Copied"; btn.classList.add("z-btn-ok"); setTimeout(() => { btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy'; btn.classList.remove("z-btn-ok"); }, 2000); });
+      } else if (btn.classList.contains("z-preview-btn")) { setPreviewCode(code); }
+      else if (btn.classList.contains("z-wrap-btn")) { const pre = btn.closest(".z-code-block")?.querySelector(".z-pre") as HTMLElement; if (pre) { const w = pre.style.whiteSpace === "pre-wrap"; pre.style.whiteSpace = w ? "" : "pre-wrap"; pre.style.overflowX = w ? "" : "hidden"; btn.classList.toggle("z-btn-ok", !w); } }
     };
-    document.addEventListener("click", handle);
-    return () => document.removeEventListener("click", handle);
+    document.addEventListener("click", fn); return () => document.removeEventListener("click", fn);
   }, []);
 
-  const newChat = () => {
-    setMessages([]); setInput(""); setActiveChatId(null); setPendingImg(null); setPendingDoc(null);
-    setSidebarOpen(false); stopSpeaking(); setSpeakingId(null);
-    setTimeout(() => taRef.current?.focus(), 0);
-  };
-
-  const loadChat = (c: Chat) => {
-    // Re-hydrate timestamps when loading from sidebar
-    const hydratedMsgs = c.messages.map(m => ({
-      ...m,
-      timestamp: m.timestamp instanceof Date ? m.timestamp : new Date((m.timestamp as any)?.seconds ? (m.timestamp as any).seconds * 1000 : m.timestamp),
-    }));
-    setMessages(hydratedMsgs);
-    setActiveChatId(c.id);
-    setSidebarOpen(false);
-    setTimeout(() => taRef.current?.focus(), 0);
-  };
-
-  const delChat = (id: string) => {
-    setChats(prev => prev.filter(c => c.id !== id));
-    if (uid) fdeleteChat(uid, id);
-    if (activeChatId === id) { setMessages([]); setActiveChatId(null); }
-  };
-
-  const handleExportChat = () => {
-    const title = activeChatId
-      ? chats.find(c => c.id === activeChatId)?.title ?? "Chat"
-      : chatTitle(messages);
-    exportChatAsTxt(messages, title);
-    setSidebarOpen(false);
-  };
+  const newChat = () => { setMessages([]); setInput(""); setActiveChatId(null); setPendingImg(null); setPendingDoc(null); setSidebarOpen(false); stopSpeaking(); setSpeakingId(null); };
+  const loadChat = (c: Chat) => { setMessages(c.messages.map(hydrateTs)); setActiveChatId(c.id); setSidebarOpen(false); };
+  const delChat = (id: string) => { setChats(p => p.filter(c => c.id !== id)); if (uid) fdeleteChat(uid, id); if (activeChatId === id) { setMessages([]); setActiveChatId(null); } };
 
   const startListen = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -876,65 +973,41 @@ export default function Index() {
     r.onerror = () => setIsListening(false);
     recRef.current = r; r.start();
   }, []);
-
   const stopListen = useCallback(() => { recRef.current?.stop(); setIsListening(false); }, []);
 
-  const handleSpeak = (text: string, id: string) => {
-    if (speakingId === id) { stopSpeaking(); setSpeakingId(null); return; }
-    setSpeakingId(id); speakText(text, () => setSpeakingId(null));
-  };
+  const handleSpeak = (text: string, id: string) => { if (speakingId === id) { stopSpeaking(); setSpeakingId(null); return; } setSpeakingId(id); speakText(text, () => setSpeakingId(null)); };
 
   const handleRegenerate = async (id: string) => {
-    const idx = messages.findIndex(m => m.id === id);
-    if (idx === -1) return;
-    const prevMsgs = messages.slice(0, idx);
-    setMessages(prevMsgs);
-    const lastUserMsg = [...prevMsgs].reverse().find(m => m.role === "user");
-    if (lastUserMsg) {
-      setLoading(true);
-      const history = prevMsgs.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
-      const activeMemory = isTempChat ? [] : memory;
-      const sid = makeId();
-      setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
-      try {
-        let res;
-        if (lastUserMsg.image) {
-          res = await fetch(`${API}/vision`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: lastUserMsg.text || "describe what you see in this image", image_base64: lastUserMsg.image.includes(",") ? lastUserMsg.image.split(",")[1] : lastUserMsg.image, image_mime: "image/jpeg", history, memory: activeMemory }),
-          });
-        } else {
-          res = await fetch(`${API}/stream`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: lastUserMsg.text, history, memory: activeMemory }),
-          });
+    const idx = messages.findIndex(m => m.id === id); if (idx === -1) return;
+    const prevMsgs = messages.slice(0, idx); setMessages(prevMsgs);
+    const lastUserMsg = [...prevMsgs].reverse().find(m => m.role === "user"); if (!lastUserMsg) return;
+    setLoading(true);
+    const history = prevMsgs.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
+    const activeMemory = isTempChat ? [] : memory;
+    const sid = makeId();
+    setMessages(p => [...p, { id: sid, role: "zoro", text: "", timestamp: new Date() }]);
+    try {
+      const res = lastUserMsg.image
+        ? await fetch(`${API}/vision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: lastUserMsg.text || "describe what you see in this image", image_base64: lastUserMsg.image.includes(",") ? lastUserMsg.image.split(",")[1] : lastUserMsg.image, image_mime: "image/jpeg", history, memory: activeMemory }) })
+        : await fetch(`${API}/stream`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: lastUserMsg.text, history, memory: activeMemory }) });
+      if (!res.ok) throw new Error();
+      const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf = "", full = "";
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const p = JSON.parse(line.slice(6));
+            if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
+            if (p.image) setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m));
+            if (p.done) { if (settings.soundEnabled) playDone(); if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); } if (!isTempChat && p.new_memory?.length) setMemory(prev => { const merged = [...prev]; for (const item of p.new_memory) if (item && !merged.includes(item)) merged.push(item); return merged; }); }
+          } catch { }
         }
-        if (!res.ok) throw new Error();
-        const reader = res.body!.getReader(); const dec = new TextDecoder();
-        let buf = "", full = "";
-        while (true) {
-          const { done, value } = await reader.read(); if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const p = JSON.parse(line.slice(6));
-              if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
-              if (p.image) { setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m)); }
-              if (p.done) {
-                if (settings.soundEnabled) playDone();
-                if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
-                if (!isTempChat && p.new_memory?.length > 0) { setMemory(prev => { const merged = [...prev]; for (const item of p.new_memory) { if (item && !merged.includes(item)) merged.push(item); } return merged; }); }
-              }
-            } catch { }
-          }
-        }
-      } catch (e) {
-        setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
       }
-      setLoading(false);
-    }
+    } catch { setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]); }
+    setLoading(false);
   };
 
   const send = async (override?: string) => {
@@ -944,10 +1017,9 @@ export default function Index() {
     const doc = pendingDoc; const img = pendingImg;
     setInput(""); setPendingImg(null); setPendingDoc(null);
     let docUrl = "";
-    if (doc && uid) { try { docUrl = await uploadDocument(uid, doc.file); } catch (e) { console.error("Upload failed:", e); } }
+    if (doc && uid) { try { docUrl = await uploadDocument(uid, doc.file); } catch { } }
     const userMsg: Message = { id: makeId(), role: "user", text: txt || (doc ? doc.name : ""), image: img ?? undefined, document: docUrl ? { name: doc!.name, url: docUrl } : undefined, timestamp: new Date() };
-    const next = [...messages, userMsg];
-    setMessages(next);
+    const next = [...messages, userMsg]; setMessages(next);
     const history = next.slice(-20).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: m.text }));
     const activeMemory = isTempChat ? [] : memory;
     const sid = makeId();
@@ -959,19 +1031,11 @@ export default function Index() {
         res = await fetch(`${API}/vision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: txt || "describe what you see in this image", image_base64: b64, image_mime: "image/jpeg", history, memory: activeMemory }) });
       } else {
         let finalTxt = txt;
-        if (doc) {
-          try {
-            const fd = new FormData(); fd.append("file", doc.file, doc.name);
-            const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd });
-            if (extRes.ok) { const extData = await extRes.json(); finalTxt = `[Attached Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim(); }
-            else { finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); }
-          } catch (e) { finalTxt = `[Attached Document: ${doc.name} (failed to read)]\n\n${txt}`.trim(); }
-        }
+        if (doc) { try { const fd = new FormData(); fd.append("file", doc.file, doc.name); const extRes = await fetch(`${API}/extract`, { method: "POST", body: fd }); if (extRes.ok) { const extData = await extRes.json(); finalTxt = `[Document: ${doc.name}]\n\n${extData.text}\n\n${txt}`.trim(); } else finalTxt = `[Document: ${doc.name} (failed)]\n\n${txt}`.trim(); } catch { finalTxt = `[Document: ${doc.name} (failed)]\n\n${txt}`.trim(); } }
         res = await fetch(`${API}/stream`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: finalTxt, history, memory: activeMemory }) });
       }
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const reader = res.body!.getReader(); const dec = new TextDecoder();
-      let buf = "", full = "";
+      if (!res.ok) throw new Error();
+      const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf = "", full = "";
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
         buf += dec.decode(value, { stream: true });
@@ -981,32 +1045,25 @@ export default function Index() {
           try {
             const p = JSON.parse(line.slice(6));
             if (p.token) { full += p.token; const c = full.replace(/\[System:[^\]]*\]/g, "").trim(); setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, text: c } : m)); }
-            if (p.image) { setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m)); }
-            if (p.status !== undefined) { setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, status: p.status } : m)); }
-            if (p.done) {
-              if (settings.soundEnabled) playDone();
-              if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); }
-              if (!isTempChat && p.new_memory?.length > 0) { setMemory(prev => { const merged = [...prev]; for (const item of p.new_memory) { if (item && !merged.includes(item)) merged.push(item); } return merged; }); }
-            }
+            if (p.image) setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, image: p.image } : m));
+            if (p.status !== undefined) setMessages(msgs => msgs.map(m => m.id === sid ? { ...m, status: p.status } : m));
+            if (p.done) { if (settings.soundEnabled) playDone(); if (settings.ttsEnabled) { setSpeakingId(sid); speakText(full, () => setSpeakingId(null)); } if (!isTempChat && p.new_memory?.length) setMemory(prev => { const merged = [...prev]; for (const item of p.new_memory) if (item && !merged.includes(item)) merged.push(item); return merged; }); }
           } catch { }
         }
       }
-    } catch (e) {
-      setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]);
-    }
+    } catch { setMessages(p => [...p, { id: makeId(), role: "zoro", text: "can't reach the backend — make sure it's running.", timestamp: new Date() }]); }
     setLoading(false);
-    setTimeout(() => taRef.current?.focus(), 0);
   };
 
   async function compressImage(dataUrl: string): Promise<string> {
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       const image = new Image();
       image.onload = () => {
         const MAX = 1024; let w = image.width, h = image.height;
         if (w > MAX || h > MAX) { if (w > h) { h = Math.round(h * MAX / w); w = MAX; } else { w = Math.round(w * MAX / h); h = MAX; } }
         const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
         canvas.getContext("2d")!.drawImage(image, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", 0.8).split(",")[1]);
+        resolve(canvas.toDataURL("image/jpeg", 0.82).split(",")[1]);
       };
       image.onerror = () => { const idx = dataUrl.indexOf(","); resolve(idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl); };
       image.src = dataUrl;
@@ -1014,44 +1071,49 @@ export default function Index() {
   }
 
   const isEmpty = messages.length === 0 && !loading;
-  const canSend = (input.trim().length > 0 || !!pendingImg || !!pendingDoc) && !loading;
 
   return (
     <>
       <style>{CSS}</style>
       <div className="root">
+
+        {/* Sidebar */}
         <AnimatePresence>
           {sidebarOpen && (
-            <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => setSidebarOpen(false)} />
+            <>
+              <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }} onClick={() => setSidebarOpen(false)} />
+              <motion.div ref={sbRef} className="sb-wrap"
+                initial={{ x: -300, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -300, opacity: 0 }}
+                transition={{ type: "spring", stiffness: 320, damping: 32, mass: 0.8 }}>
+                <Sidebar
+                  chats={chats} activeChatId={activeChatId}
+                  onLoad={loadChat} onDelete={delChat} onNew={newChat}
+                  onClose={() => setSidebarOpen(false)} user={user}
+                  onExportChat={() => { exportChatAsTxt(messages, activeChatId ? chats.find(c => c.id === activeChatId)?.title ?? "Chat" : chatTitle(messages)); setSidebarOpen(false); }}
+                  messages={messages}
+                />
+              </motion.div>
+            </>
           )}
         </AnimatePresence>
 
-        <AnimatePresence>
-          {sidebarOpen && (
-            <motion.div ref={sbRef} className="sb-wrap"
-              initial={{ x: -290 }} animate={{ x: 0 }} exit={{ x: -290 }}
-              transition={{ type: "spring", stiffness: 360, damping: 34 }}>
-              <Sidebar
-                chats={chats} activeChatId={activeChatId}
-                onLoad={loadChat} onDelete={delChat} onNew={newChat}
-                onClose={() => setSidebarOpen(false)} user={user}
-                onExportChat={handleExportChat} messages={messages}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-
+        {/* Preview Modal */}
         <AnimatePresence>
           {previewCode && (
             <motion.div className="modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               onMouseDown={e => { if (e.target === e.currentTarget) setPreviewCode(null); }}>
-              <motion.div className="preview-modal" initial={{ scale: 0.9, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.9, opacity: 0, y: 20 }}>
+              <motion.div className="preview-modal"
+                initial={{ scale: 0.92, opacity: 0, y: 24 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.92, opacity: 0, y: 24 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}>
                 <div className="preview-hd">
-                  <div className="preview-title">{Ico.sparkle} Live Preview</div>
-                  <div className="preview-acts">
-                    <button className="preview-close" onClick={() => setPreviewCode(null)}>{Ico.x(14)}</button>
+                  <div className="preview-title">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 3h6v6M10 14L21 3" /></svg>
+                    Live Preview
                   </div>
+                  <button className="preview-close" onClick={() => setPreviewCode(null)}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                  </button>
                 </div>
                 <iframe srcDoc={previewCode} title="preview" className="preview-frame" sandbox="allow-scripts" />
               </motion.div>
@@ -1060,202 +1122,169 @@ export default function Index() {
         </AnimatePresence>
 
         {/* Header */}
-        <header className="hdr">
+        <motion.header className="hdr"
+          initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+          transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}>
           <div className="hdr-l">
-            <button className="ib" onClick={() => setSidebarOpen(s => !s)}>{Ico.menu}</button>
-            <div className="logo">
-              <div className="logo-dot" />
+            <MagneticBtn className="ib" onClick={() => setSidebarOpen(s => !s)}>
+              <motion.div animate={sidebarOpen ? { rotate: 90 } : { rotate: 0 }} transition={{ duration: 0.2 }}>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <AnimatePresence mode="wait">
+                    {sidebarOpen
+                      ? <motion.g key="x" initial={{ opacity: 0, rotate: -90 }} animate={{ opacity: 1, rotate: 0 }} exit={{ opacity: 0 }}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></motion.g>
+                      : <motion.g key="menu" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></motion.g>}
+                  </AnimatePresence>
+                </svg>
+              </motion.div>
+            </MagneticBtn>
+
+            <motion.div className="logo" whileHover={{ scale: 1.02 }}>
+              <motion.div className="logo-orb"
+                animate={{ rotate: 360 }}
+                transition={{ duration: 12, repeat: Infinity, ease: "linear" }}>
+                <div className="logo-orb-inner" />
+              </motion.div>
               <span className="logo-name">ZORO</span>
-            </div>
+              {isTempChat && (
+                <motion.span className="temp-pill" initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}>Temp</motion.span>
+              )}
+            </motion.div>
           </div>
-          <div className="hdr-r">
-            <div className="mode-tog">
+
+          <div className="hdr-c">
+            <div className="mode-seg">
               <button className={`mode-btn${mode === "chat" ? " mode-on" : ""}`} onClick={() => setMode("chat")}>
-                {Ico.chat} Chat
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                Chat
               </button>
               <button className={`mode-btn${mode === "voice" ? " mode-on" : ""}`} onClick={() => setMode("voice")}>
-                {Ico.mic(false)} Voice
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /></svg>
+                Voice
               </button>
+              {mode === "chat" && (
+                <motion.div className="mode-indicator" layoutId="mode-pill"
+                  transition={{ type: "spring", stiffness: 500, damping: 32 }} />
+              )}
             </div>
-            {isTempChat && <span className="temp-pill">Temp</span>}
+          </div>
+
+          <div className="hdr-r">
             {user && (
               <>
-                <button className={`ib ${showSettings ? 'ib-on' : ''}`} onClick={() => { setShowSettings(s => !s); setShowProfile(false); setShowMem(false); }}>
-                  {Ico.settings}
-                </button>
-                <button
-                  className={`hdr-avatar${showProfile ? " hdr-av-open" : ""}`}
-                  title={user.displayName || user.email || ""}
-                  onClick={() => { setShowProfile(s => !s); setShowSettings(false); setShowMem(false); }}
-                >
-                  {user.photoURL
-                    ? <img src={user.photoURL} alt="" className="hdr-av-img" referrerPolicy="no-referrer" />
-                    : <span>{(user.displayName || user.email || "U")[0].toUpperCase()}</span>}
-                </button>
+                <div className="drop-wrap">
+                  <MagneticBtn className={`ib${showSettings ? " ib-on" : ""}`}
+                    onClick={() => { setShowSettings(s => !s); setShowProfile(false); setShowMem(false); }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                  </MagneticBtn>
+                  <AnimatePresence>
+                    {showSettings && (
+                      <motion.div className="drop-panel"
+                        initial={{ opacity: 0, scale: 0.93, y: -8 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.93, y: -8 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}>
+                        <SettingsDrop settings={settings} onChange={(s: Settings) => { setSettings(s); if (!s.ttsEnabled) { stopSpeaking(); setSpeakingId(null); } }} onClose={() => setShowSettings(false)} />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                <div className="drop-wrap">
+                  <MagneticBtn
+                    className={`hdr-av${showProfile ? " hdr-av-open" : ""}`}
+                    onClick={() => { setShowProfile(s => !s); setShowSettings(false); setShowMem(false); }}>
+                    {user.photoURL
+                      ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" />
+                      : <span>{(user.displayName || user.email || "U")[0].toUpperCase()}</span>}
+                  </MagneticBtn>
+                  <AnimatePresence>
+                    {showProfile && (
+                      <motion.div className="drop-panel"
+                        initial={{ opacity: 0, scale: 0.93, y: -8 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.93, y: -8 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}>
+                        <ProfileDrop user={user} onClose={() => setShowProfile(false)} onNewChat={newChat}
+                          onOpenMemory={() => { setShowMem(true); setShowProfile(false); }} onSignOut={signOut}
+                          isTempChat={isTempChat} onToggleTemp={() => { setIsTempChat(t => !t); setMessages([]); setActiveChatId(null); }} />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                <AnimatePresence>
+                  {showMem && (
+                    <motion.div className="drop-panel mem-panel"
+                      initial={{ opacity: 0, scale: 0.93, y: -8 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.93, y: -8 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 30 }}>
+                      <MemPanel memory={memory} onAdd={(s: string) => setMemory(p => [...p, s])}
+                        onDel={(i: number) => setMemory(p => p.filter((_, j) => j !== i))} onClose={() => setShowMem(false)} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </>
             )}
           </div>
-        </header>
-
-        {/* Panels */}
-        <AnimatePresence>
-          {showMem && (
-            <motion.div className="panel-wrap" initial={{ opacity: 0, y: -10, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -10, scale: 0.97 }} transition={{ duration: 0.18 }}>
-              <MemPanel memory={memory} onAdd={s => setMemory(p => [...p, s])}
-                onDel={i => setMemory(p => p.filter((_, j) => j !== i))} onClose={() => setShowMem(false)} />
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <AnimatePresence>
-          {showProfile && (
-            <motion.div className="panel-wrap prof-panel-wrap" initial={{ opacity: 0, y: -10, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -10, scale: 0.97 }} transition={{ duration: 0.18 }}>
-              <ProfileDropdown user={user} settings={settings}
-                onChange={s => { setSettings(s); if (!s.ttsEnabled) { stopSpeaking(); setSpeakingId(null); } }}
-                onOpenMemory={() => setShowMem(true)} onClose={() => setShowProfile(false)}
-                onSignOut={signOut} isTempChat={isTempChat}
-                onToggleTemp={() => { setIsTempChat(t => !t); setMessages([]); setActiveChatId(null); }}
-                onNewChat={newChat} />
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <AnimatePresence>
-          {showSettings && (
-            <motion.div className="panel-wrap prof-panel-wrap" initial={{ opacity: 0, y: -10, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -10, scale: 0.97 }} transition={{ duration: 0.18 }}>
-              <SettingsDropdown settings={settings} onChange={s => { setSettings(s); if (!s.ttsEnabled) { stopSpeaking(); setSpeakingId(null); } }} onClose={() => setShowSettings(false)} />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        </motion.header>
 
         {/* Body */}
         <main className="body">
           <AnimatePresence mode="wait">
             {mode === "voice" ? (
               <motion.div key="voice" className="voice-wrap"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
                 <VoiceMode memory={memory} settings={settings} />
               </motion.div>
             ) : isEmpty ? (
               <motion.div key="empty" className="empty-wrap"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-
-                <div className="welcome-hero">
-                  <motion.p className="welcome-hi" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05, duration: 0.4 }}>
-                    Hi, {firstName} ✦
-                  </motion.p>
-                  <motion.h1 className="welcome-heading" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.12, duration: 0.4 }}>
-                    Where should we begin?
-                  </motion.h1>
-                </div>
-
-                {pendingImg && (
-                  <div className="img-pre-wrap">
-                    <div className="img-pre">
-                      <img src={pendingImg} alt="" />
-                      <button className="img-rm" onPointerDown={e => { e.preventDefault(); setPendingImg(null); }}>{Ico.x(9)}</button>
-                    </div>
-                  </div>
-                )}
-                {pendingDoc && (
-                  <div className="img-pre-wrap">
-                    <div className="doc-pre">
-                      <span className="doc-name">{pendingDoc.name}</span>
-                      <button className="img-rm" onPointerDown={e => { e.preventDefault(); setPendingDoc(null); }}>{Ico.x(9)}</button>
-                    </div>
-                  </div>
-                )}
-
-                <motion.div className="empty-inp-box" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.4 }}>
-                  <button className="inp-ico" onPointerDown={e => { e.preventDefault(); docFileRef.current?.click(); }} disabled={loading} title="Attach document">{Ico.clip}</button>
-                  <button className="inp-ico" onPointerDown={e => { e.preventDefault(); fileRef.current?.click(); }} disabled={loading} title="Attach image">{Ico.img}</button>
-                  <textarea ref={taRef} className="inp-ta" value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyDown={e => { if (!mobile && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                    placeholder="Ask anything…"
-                    disabled={loading} rows={1} autoCapitalize="sentences" spellCheck />
-                  <button className={`inp-ico mic-ico${isListening ? " mic-live" : ""}`}
-                    onPointerDown={e => { e.preventDefault(); isListening ? stopListen() : startListen(); }}
-                    disabled={loading}>{Ico.mic(isListening)}
-                  </button>
-                  <button className="inp-send" onPointerDown={e => { e.preventDefault(); send(); }} disabled={!canSend}>{Ico.send}</button>
-                </motion.div>
-
-                <motion.p className="empty-hint" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.4 }}>
-                  {mobile ? "Tap send · mic for voice" : "Enter to send · Shift+Enter for new line"}
-                </motion.p>
-
-                <motion.div className="chips-grid" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.35, duration: 0.3 }}>
-                  {SUGGESTIONS.map((s, i) => (
-                    <motion.button key={s.label} className="chip"
-                      initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: 0.38 + i * 0.06, duration: 0.3 }}
-                      onClick={() => { setInput(s.prompt); setTimeout(() => taRef.current?.focus(), 0); }}>
-                      <span className="chip-ico">{s.icon}</span>
-                      <span className="chip-label">{s.label}</span>
-                    </motion.button>
-                  ))}
-                </motion.div>
+                <EmptyState
+                  firstName={firstName} input={input} setInput={setInput} onSend={() => send()} loading={loading}
+                  isListening={isListening} startListen={startListen} stopListen={stopListen}
+                  pendingImg={pendingImg} setPendingImg={setPendingImg}
+                  pendingDoc={pendingDoc} setPendingDoc={setPendingDoc}
+                  fileRef={fileRef} docFileRef={docFileRef} cameraRef={cameraRef}
+                  mobile={mobile} isTempChat={isTempChat}
+                />
               </motion.div>
             ) : (
               <motion.div key="chat" className="chat-scroll"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.14 }}>
-                <div className="chat-inner">
-                  <AnimatePresence initial={false}>
-                    {messages.map((msg, i, arr) => {
-                      const isLastZoro = msg.role === "zoro" && i === arr.length - 1;
-                      return (
-                        <Bubble key={msg.id} msg={msg}
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+                <LayoutGroup>
+                  <div className="chat-inner">
+                    <AnimatePresence initial={false}>
+                      {messages.map((msg, i, arr) => (
+                        <Bubble key={msg.id} msg={msg} index={i}
                           onPin={id => setMessages(p => p.map(m => m.id === id ? { ...m, pinned: !m.pinned } : m))}
-                          onSpeak={handleSpeak}
-                          onRegenerate={handleRegenerate}
-                          speaking={speakingId === msg.id}
-                          tts={settings.ttsEnabled}
-                          isLastZoro={isLastZoro} />
-                      );
-                    })}
-                  </AnimatePresence>
-                  <div ref={bottomRef} />
-                </div>
+                          onSpeak={handleSpeak} onRegenerate={handleRegenerate}
+                          speaking={speakingId === msg.id} tts={settings.ttsEnabled}
+                          isLastZoro={msg.role === "zoro" && i === arr.length - 1} />
+                      ))}
+                    </AnimatePresence>
+                    <div ref={bottomRef} />
+                  </div>
+                </LayoutGroup>
               </motion.div>
             )}
           </AnimatePresence>
         </main>
 
-        {/* Footer input — chat mode, non-empty */}
-        {mode === "chat" && !isEmpty && (
-          <footer className="foot">
-            {pendingImg && (
-              <div className="img-pre-wrap">
-                <div className="img-pre">
-                  <img src={pendingImg} alt="" />
-                  <button className="img-rm" onPointerDown={e => { e.preventDefault(); setPendingImg(null); }}>{Ico.x(9)}</button>
-                </div>
+        {/* Footer */}
+        <AnimatePresence>
+          {mode === "chat" && !isEmpty && (
+            <motion.footer className="foot"
+              initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 40, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 300, damping: 30 }}>
+              <div className="foot-inner">
+                <InputBox
+                  input={input} setInput={setInput} onSend={() => send()} loading={loading}
+                  isListening={isListening} startListen={startListen} stopListen={stopListen}
+                  pendingImg={pendingImg} setPendingImg={setPendingImg}
+                  pendingDoc={pendingDoc} setPendingDoc={setPendingDoc}
+                  fileRef={fileRef} docFileRef={docFileRef} cameraRef={cameraRef}
+                  mobile={mobile} isTempChat={isTempChat}
+                />
+                <p className="foot-hint">{mobile ? "Tap send or mic for voice" : "↵ send · ⇧↵ newline"}</p>
               </div>
-            )}
-            {pendingDoc && (
-              <div className="img-pre-wrap">
-                <div className="doc-pre">
-                  <span className="doc-name">{pendingDoc.name}</span>
-                  <button className="img-rm" onPointerDown={e => { e.preventDefault(); setPendingDoc(null); }}>{Ico.x(9)}</button>
-                </div>
-              </div>
-            )}
-            <div className="inp-box">
-              <button className="inp-ico" onPointerDown={e => { e.preventDefault(); docFileRef.current?.click(); }} disabled={loading} title="Document">{Ico.clip}</button>
-              <button className="inp-ico" onPointerDown={e => { e.preventDefault(); cameraRef.current?.click(); }} disabled={loading} title="Camera">{Ico.camera}</button>
-              <button className="inp-ico" onPointerDown={e => { e.preventDefault(); fileRef.current?.click(); }} disabled={loading} title="Image">{Ico.img}</button>
-              <textarea ref={taRef} className="inp-ta" value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (!mobile && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder={isListening ? "Listening…" : "Message ZORO…"}
-                disabled={loading} rows={1} autoCapitalize="sentences" spellCheck />
-              <button className={`inp-ico mic-ico${isListening ? " mic-live" : ""}`}
-                onPointerDown={e => { e.preventDefault(); isListening ? stopListen() : startListen(); }}
-                disabled={loading}>{Ico.mic(isListening)}</button>
-              <button className="inp-send" onPointerDown={e => { e.preventDefault(); send(); }} disabled={!canSend}>{Ico.send}</button>
-            </div>
-            <p className="foot-hint">{mobile ? "Tap send · mic for voice" : "Enter to send · Shift+Enter for new line"}</p>
-          </footer>
-        )}
+            </motion.footer>
+          )}
+        </AnimatePresence>
 
         <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
           onChange={e => { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => { setPendingImg(r.result as string); setPendingDoc(null); }; r.readAsDataURL(f); e.target.value = ""; }} />
@@ -1271,335 +1300,376 @@ export default function Index() {
 // ─── CSS ──────────────────────────────────────────────────────────────────────
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap');
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 
-:root {
-  --bg:           #f7f4ef;
-  --bg2:          #f0ece4;
-  --surface:      #ffffff;
-  --surface-2:    #faf8f4;
-  --border:       #e8e1d6;
-  --border-2:     #ddd5c8;
-  --text:         #1e1b17;
-  --text-2:       #7a7268;
-  --text-3:       #b0a89e;
-  --accent:       #b07d5a;
-  --accent-2:     #c99070;
-  --accent-light: rgba(176,125,90,.10);
-  --accent-glow:  rgba(176,125,90,.20);
-  --user-bg:      transparent;
-  --user-fg:      var(--accent);
-  --zoro-bg:      transparent;
-  --zoro-fg:      var(--text);
-  --font:         'DM Sans', system-ui, sans-serif;
-  --font-display: 'Playfair Display', Georgia, serif;
-  --mono:         'JetBrains Mono', monospace;
-  --sb-w:         272px;
-  --hdr-h:        58px;
-  --radius:       18px;
-  --radius-sm:    10px;
-  --shadow-sm:    0 1px 6px rgba(0,0,0,.06);
-  --shadow:       0 2px 16px rgba(0,0,0,.08);
-  --shadow-lg:    0 8px 40px rgba(0,0,0,.12);
-  --shadow-xl:    0 20px 60px rgba(0,0,0,.15);
+:root{
+  --bg:#f8f5f0;
+  --bg2:#f1ece4;
+  --surface:#ffffff;
+  --surface2:#fdfaf6;
+  --border:rgba(0,0,0,0.07);
+  --border2:rgba(0,0,0,0.12);
+  --text:#18160e;
+  --text2:#8a8075;
+  --text3:#c4bdb3;
+  --accent:#a0724a;
+  --accent2:#c48b62;
+  --accent3:#e8b48a;
+  --al:rgba(160,114,74,0.10);
+  --ag:rgba(160,114,74,0.18);
+  --font:'Inter',system-ui,sans-serif;
+  --serif:'Instrument Serif',Georgia,serif;
+  --mono:'JetBrains Mono',monospace;
+  --sb-w:268px;
+  --hdr-h:56px;
+  --ease:[0.23,1,0.32,1];
+  --s1:0 1px 4px rgba(0,0,0,0.05);
+  --s2:0 4px 20px rgba(0,0,0,0.08);
+  --s3:0 12px 48px rgba(0,0,0,0.12);
+  --s4:0 24px 72px rgba(0,0,0,0.16);
 }
 
-body { font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
-.root { height: 100dvh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; position: relative; }
-.overlay { position: fixed; inset: 0; background: rgba(30,27,23,.35); backdrop-filter: blur(2px); z-index: 40; }
+body{font-family:var(--font);background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;font-feature-settings:"cv01","cv02","cv03";letter-spacing:-0.01em;}
+
+.root{height:100dvh;display:flex;flex-direction:column;background:var(--bg);overflow:hidden;position:relative;}
+
+/* ── Cursor Glow ── */
+.cursor-glow{position:fixed;pointer-events:none;z-index:0;width:480px;height:480px;transform:translate(-50%,-50%);background:radial-gradient(circle,rgba(160,114,74,0.08) 0%,transparent 65%);transition:opacity 0.3s;}
+
+/* ── Overlay ── */
+.overlay{position:fixed;inset:0;background:rgba(20,18,14,0.4);backdrop-filter:blur(3px);z-index:40;}
 
 /* ── Sidebar ── */
-.sb-wrap { position: fixed; top: 0; left: 0; height: 100dvh; z-index: 50; }
-.sb { width: var(--sb-w); height: 100%; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: var(--shadow-xl); }
-.sb-top { padding: 16px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
-.sb-brand { display: flex; align-items: center; gap: 9px; font-family: var(--font-display); font-weight: 600; font-size: 16px; color: var(--text); letter-spacing: .01em; }
-.sb-dot { width: 9px; height: 9px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 0 8px var(--accent-glow); }
-.sb-new { display: flex; align-items: center; gap: 8px; margin: 12px 10px 4px; padding: 10px 14px; border-radius: 12px; border: 1.5px dashed var(--border-2); background: transparent; color: var(--text-2); font-family: var(--font); font-size: 13.5px; font-weight: 500; cursor: pointer; transition: all .18s; }
-.sb-new:hover { background: var(--accent-light); border-color: var(--accent); color: var(--accent); }
-.sb-export { display: flex; align-items: center; gap: 8px; margin: 4px 10px 6px; padding: 8px 14px; border-radius: 12px; border: 1.5px solid var(--border); background: transparent; color: var(--text-2); font-family: var(--font); font-size: 13px; font-weight: 500; cursor: pointer; transition: all .18s; }
-.sb-export:hover { background: var(--bg2); color: var(--text); }
-.sb-new-ico { display: flex; align-items: center; }
-.sb-list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
-.sb-list::-webkit-scrollbar { width: 3px; }
-.sb-list::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
-.sb-empty-state { display: flex; flex-direction: column; align-items: center; padding: 32px 16px; gap: 8px; }
-.sb-empty-icon { font-size: 28px; opacity: .4; }
-.sb-empty { font-size: 13px; color: var(--text-2); font-weight: 500; }
-.sb-empty-sub { font-size: 12px; color: var(--text-3); text-align: center; line-height: 1.5; }
-.sb-gl { font-size: 10px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; padding: 12px 7px 5px; }
-.sb-item { display: flex; align-items: center; gap: 8px; padding: 9px 8px 9px 10px; border-radius: 10px; cursor: pointer; font-size: 13px; color: var(--text); border: 1px solid transparent; margin-bottom: 1px; transition: all .14s; }
-.sb-item:hover { background: var(--bg2); }
-.sb-active { background: var(--accent-light); border-color: rgba(176,125,90,.2); color: var(--accent); }
-.sb-i-ico { color: var(--text-3); flex-shrink: 0; }
-.sb-active .sb-i-ico { color: var(--accent); opacity: .7; }
-.sb-i-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sb-del { width: 22px; height: 22px; border: none; background: transparent; color: var(--text-3); cursor: pointer; border-radius: 6px; display: none; align-items: center; justify-content: center; padding: 0; transition: all .1s; }
-.sb-item:hover .sb-del { display: flex; }
-.sb-del:hover { background: var(--border-2); color: var(--text); }
-.sb-user { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--border); background: var(--surface-2); }
-.sb-user-av { width: 32px; height: 32px; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: var(--accent-light); color: var(--accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 1.5px solid var(--border); }
-.sb-user-av-img { width: 100%; height: 100%; object-fit: cover; }
-.sb-user-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.sb-user-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sb-user-email { font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-wrap{position:fixed;top:0;left:0;height:100dvh;z-index:50;}
+.sb{width:var(--sb-w);height:100%;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;box-shadow:var(--s4);}
+.sb-hd{padding:15px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.sb-logo{display:flex;align-items:center;gap:10px;font-family:var(--serif);font-size:17px;color:var(--text);letter-spacing:0.01em;}
+.sb-logo-dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 0 10px var(--ag);}
+.sb-close{color:var(--text3)!important;}
+.sb-actions{padding:10px 10px 6px;display:flex;flex-direction:column;gap:4px;}
+.sb-new{display:flex;align-items:center;gap:9px;padding:10px 13px;border-radius:10px;border:1px dashed var(--border2);background:transparent;color:var(--text2);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;transition:all 0.16s;width:100%;text-align:left;}
+.sb-new:hover{background:var(--al);border-color:var(--accent);color:var(--accent);}
+.sb-export-btn{display:flex;align-items:center;gap:9px;padding:8px 13px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text3);font-family:var(--font);font-size:12.5px;cursor:pointer;transition:all 0.16s;width:100%;text-align:left;}
+.sb-export-btn:hover{background:var(--bg2);color:var(--text2);}
+.sb-list{flex:1;overflow-y:auto;padding:4px 8px 12px;}
+.sb-list::-webkit-scrollbar{width:3px;}
+.sb-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px;}
+.sb-group{margin-bottom:6px;}
+.sb-gl{font-size:9.5px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.1em;padding:12px 8px 5px;}
+.sb-item{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 10px;border-radius:10px;cursor:pointer;font-size:13px;color:var(--text);border:1px solid transparent;margin-bottom:1px;transition:all 0.13s;position:relative;}
+.sb-item:hover{background:var(--bg2);}
+.sb-active{background:var(--al)!important;border-color:rgba(160,114,74,0.2)!important;color:var(--accent);}
+.sb-i-ico{color:var(--text3);flex-shrink:0;display:flex;}
+.sb-active .sb-i-ico{color:var(--accent);opacity:0.7;}
+.sb-i-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sb-del{width:22px;height:22px;border:none;background:transparent;color:var(--text3);cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0;}
+.sb-del:hover{background:var(--border2);color:var(--text);}
+.sb-empty{display:flex;flex-direction:column;align-items:center;padding:40px 16px;gap:8px;color:var(--text3);}
+.sb-empty-icon{opacity:0.3;margin-bottom:4px;}
+.sb-empty p{font-size:13px;font-weight:500;color:var(--text2);}
+.sb-empty span{font-size:12px;color:var(--text3);}
+.sb-foot{display:flex;align-items:center;gap:10px;padding:12px 14px;border-top:1px solid var(--border);background:var(--surface2);}
+.sb-user-av{width:30px;height:30px;border-radius:50%;overflow:hidden;background:var(--al);color:var(--accent);font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid var(--border);}
+.sb-user-av img{width:100%;height:100%;object-fit:cover;}
+.sb-user-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;}
+.sb-user-name{font-size:12.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sb-user-email{font-size:10.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* ── Header ── */
-.hdr { flex-shrink: 0; height: var(--hdr-h); display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: rgba(247,244,239,.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); position: relative; z-index: 10; }
-.hdr-l, .hdr-r { display: flex; align-items: center; gap: 8px; }
-.logo { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-weight: 500; font-size: 17px; color: var(--text); letter-spacing: .01em; }
-.logo-dot { width: 9px; height: 9px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 0 8px var(--accent-glow); }
-.ib { width: 34px; height: 34px; border-radius: 10px; border: none; background: transparent; color: var(--text-2); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .14s; -webkit-tap-highlight-color: transparent; flex-shrink: 0; }
-.ib:hover { background: var(--bg2); color: var(--text); }
-.ib-on { background: var(--accent-light); color: var(--accent); }
-.ib-on:hover { background: var(--accent-light); color: var(--accent); }
-.mode-tog { display: flex; align-items: center; background: var(--bg2); border-radius: 12px; padding: 3px; gap: 2px; border: 1px solid var(--border); }
-.mode-btn { display: flex; align-items: center; gap: 6px; padding: 5px 13px; border-radius: 9px; border: none; background: transparent; color: var(--text-2); font-family: var(--font); font-size: 12.5px; font-weight: 500; cursor: pointer; transition: all .16s; -webkit-tap-highlight-color: transparent; }
-.mode-on { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
-.temp-pill { font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 20px; background: var(--accent-light); color: var(--accent); border: 1px solid rgba(176,125,90,.25); letter-spacing: .06em; text-transform: uppercase; }
-.hdr-avatar { width: 32px; height: 32px; border-radius: 50%; overflow: hidden; background: var(--accent-light); color: var(--accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 2px solid var(--border); cursor: pointer; transition: all .16s; padding: 0; }
-.hdr-avatar:hover, .hdr-av-open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-.hdr-av-img { width: 100%; height: 100%; object-fit: cover; }
+.hdr{flex-shrink:0;height:var(--hdr-h);display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:rgba(248,245,240,0.85);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-bottom:1px solid var(--border);position:relative;z-index:10;}
+.hdr-l,.hdr-r{display:flex;align-items:center;gap:8px;}
+.hdr-c{position:absolute;left:50%;transform:translateX(-50%);}
 
-/* ── Panels ── */
-.panel-wrap { position: absolute; top: calc(var(--hdr-h) + 10px); right: 16px; z-index: 30; }
-.prof-panel-wrap { right: 12px; }
-.panel { width: 300px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-xl); overflow: hidden; }
-.panel-hd { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); }
-.panel-title { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text); }
-.panel-hint { font-size: 12px; color: var(--text-2); padding: 10px 16px 4px; line-height: 1.5; }
-.mem-list { max-height: 160px; overflow-y: auto; padding: 6px 10px; display: flex; flex-direction: column; gap: 5px; }
-.mem-empty { font-size: 12px; color: var(--text-3); text-align: center; padding: 16px 0; }
-.mem-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--bg2); border-radius: 9px; font-size: 12.5px; color: var(--text); border: 1px solid var(--border); }
-.mem-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mem-del { width: 18px; height: 18px; border: none; background: transparent; color: var(--text-3); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 5px; }
-.mem-del:hover { background: var(--border); }
-.panel-inp-row { display: flex; gap: 8px; padding: 10px 10px 12px; border-top: 1px solid var(--border); }
-.panel-inp { flex: 1; border: 1.5px solid var(--border); border-radius: 10px; background: var(--bg2); color: var(--text); font-family: var(--font); font-size: 13px; padding: 8px 11px; outline: none; transition: border-color .14s; }
-.panel-inp:focus { border-color: var(--accent); }
-.panel-add { padding: 8px 14px; border-radius: 10px; border: none; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-family: var(--font); font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .12s; }
-.panel-add:hover { opacity: .85; }
-.set-list { padding: 4px 0 6px; }
-.set-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--border); }
-.set-row:last-child { border-bottom: none; }
-.temp-row { border-bottom: none !important; }
-.set-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
-.set-icon { margin-right: 6px; font-size: 14px; }
-.set-label { font-size: 13px; font-weight: 500; color: var(--text); }
-.set-desc { font-size: 11.5px; color: var(--text-2); line-height: 1.4; }
-.tog { width: 40px; height: 23px; border-radius: 12px; background: var(--border-2); position: relative; cursor: pointer; transition: background .2s; flex-shrink: 0; }
-.tog-on { background: var(--accent); }
-.tog-thumb { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: transform .22s; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
-.tog-on .tog-thumb { transform: translateX(17px); }
-.prof-drop { width: 308px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-xl); overflow: hidden; }
-.prof-user { display: flex; align-items: center; gap: 12px; padding: 15px 15px 15px 16px; }
-.prof-av { width: 42px; height: 42px; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: linear-gradient(135deg, var(--accent-light), var(--bg2)); color: var(--accent); font-size: 17px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid var(--border); }
-.prof-av-img { width: 100%; height: 100%; object-fit: cover; }
-.prof-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.prof-name { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prof-email { font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prof-divider { height: 1px; background: var(--border); }
-.prof-section-label { font-size: 10px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; padding: 10px 16px 3px; }
-.prof-action { width: 100%; display: flex; align-items: center; gap: 12px; padding: 11px 14px 11px 16px; border: none; background: transparent; cursor: pointer; text-align: left; transition: background .12s; -webkit-tap-highlight-color: transparent; }
-.prof-action:hover { background: var(--bg2); }
-.prof-action-ico { color: var(--text-2); display: flex; align-items: center; flex-shrink: 0; }
-.prof-action-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.prof-action-label { font-size: 13.5px; font-weight: 500; color: var(--text); }
-.prof-action-desc { font-size: 11.5px; color: var(--text-2); }
-.prof-action-arr { font-size: 20px; color: var(--text-3); line-height: 1; }
-.set-signout-wrap { padding: 10px 14px 14px; }
-.set-signout { width: 100%; padding: 10px; border-radius: 11px; border: 1.5px solid rgba(200,60,60,.25); background: transparent; color: #c0392b; font-family: var(--font); font-size: 13px; font-weight: 500; cursor: pointer; transition: all .14s; }
-.set-signout:hover { background: rgba(200,60,60,.06); }
+/* Logo */
+.logo{display:flex;align-items:center;gap:9px;font-family:var(--serif);font-size:18px;color:var(--text);letter-spacing:0.02em;cursor:default;}
+.logo-orb{width:9px;height:9px;position:relative;}
+.logo-orb-inner{position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--accent),var(--accent2),var(--accent3),var(--accent));box-shadow:0 0 8px var(--ag);}
+.logo-name{line-height:1;}
+.temp-pill{font-size:9px;font-weight:600;padding:2px 8px;border-radius:20px;background:var(--al);color:var(--accent);border:1px solid rgba(160,114,74,0.25);letter-spacing:0.08em;text-transform:uppercase;font-family:var(--font);}
+
+/* Icon buttons */
+.ib{width:32px;height:32px;border-radius:9px;border:none;background:transparent;color:var(--text2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.13s;-webkit-tap-highlight-color:transparent;flex-shrink:0;}
+.ib:hover{background:var(--bg2);color:var(--text);}
+.ib-on{background:var(--al);color:var(--accent);}
+
+/* Mode toggle */
+.mode-seg{display:flex;align-items:center;background:var(--bg2);border:1px solid var(--border);border-radius:11px;padding:3px;gap:2px;position:relative;}
+.mode-btn{display:flex;align-items:center;gap:5px;padding:5px 12px;border-radius:8px;border:none;background:transparent;color:var(--text2);font-family:var(--font);font-size:12px;font-weight:500;cursor:pointer;transition:all 0.15s;position:relative;z-index:1;}
+.mode-btn.mode-on{color:var(--text);}
+.mode-indicator{position:absolute;inset:3px 0;height:calc(100% - 6px);background:var(--surface);border-radius:8px;box-shadow:var(--s1);z-index:0;}
+
+/* Header avatar */
+.hdr-av{width:30px;height:30px;border-radius:50%;overflow:hidden;background:var(--al);color:var(--accent);font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1.5px solid var(--border);cursor:pointer;transition:all 0.15s;padding:0;}
+.hdr-av:hover,.hdr-av-open{border-color:var(--accent);box-shadow:0 0 0 3px var(--ag);}
+.hdr-av img{width:100%;height:100%;object-fit:cover;}
+
+/* Drop panels */
+.drop-wrap{position:relative;}
+.drop-panel{position:absolute;top:calc(100% + 10px);right:0;z-index:100;transform-origin:top right;}
+.mem-panel{right:-8px;}
+.drop{width:300px;background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--s4);overflow:hidden;}
+.drop-user{display:flex;align-items:center;gap:11px;padding:14px 14px 14px 15px;}
+.drop-av{width:38px;height:38px;border-radius:50%;overflow:hidden;background:var(--al);color:var(--accent);font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1.5px solid var(--border);}
+.drop-av img{width:100%;height:100%;object-fit:cover;}
+.drop-info{flex:1;min-width:0;}
+.drop-name{display:block;font-size:13.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.drop-email{display:block;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;}
+.drop-divider{height:1px;background:var(--border);}
+.drop-action{width:100%;display:flex;align-items:center;gap:11px;padding:11px 14px 11px 15px;border:none;background:transparent;cursor:pointer;text-align:left;transition:background 0.12s;}
+.drop-action:hover{background:var(--bg2);}
+.drop-action-ico{color:var(--text2);display:flex;align-items:center;flex-shrink:0;}
+.drop-action-info{flex:1;display:flex;flex-direction:column;gap:1px;}
+.drop-action-label{font-size:13px;font-weight:500;color:var(--text);}
+.drop-action-desc{font-size:11px;color:var(--text3);}
+.drop-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 15px;cursor:pointer;}
+.drop-toggle-info{display:flex;flex-direction:column;gap:2px;flex:1;}
+.drop-toggle-label{font-size:13px;font-weight:500;color:var(--text);}
+.drop-toggle-desc{font-size:11px;color:var(--text3);}
+.tog{width:38px;height:22px;border-radius:11px;background:var(--border2);position:relative;cursor:pointer;transition:background 0.22s;flex-shrink:0;}
+.tog-on{background:var(--accent);}
+.tog-thumb{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform 0.22s cubic-bezier(0.34,1.56,0.64,1);box-shadow:0 1px 4px rgba(0,0,0,0.15);}
+.tog-on .tog-thumb{transform:translateX(16px);}
+.drop-signout-wrap{padding:10px 12px 12px;}
+.drop-signout{width:100%;padding:9px;border-radius:10px;border:1px solid rgba(200,60,60,0.2);background:transparent;color:#c0392b;font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;transition:all 0.13s;}
+.drop-signout:hover{background:rgba(200,60,60,0.05);}
+
+/* Memory */
+.mem-scroll{max-height:180px;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:5px;}
+.mem-empty{font-size:12px;color:var(--text3);text-align:center;padding:16px 0;}
+.mem-item{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);border-radius:8px;font-size:12.5px;color:var(--text);border:1px solid var(--border);}
+.mem-item span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mem-del{width:18px;height:18px;border:none;background:transparent;color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;border-radius:5px;flex-shrink:0;}
+.mem-del:hover{background:var(--border);color:var(--text);}
+.mem-add-row{display:flex;gap:8px;padding:10px 12px 12px;border-top:1px solid var(--border);}
+.mem-inp{flex:1;border:1px solid var(--border);border-radius:9px;background:var(--bg2);color:var(--text);font-family:var(--font);font-size:13px;padding:8px 11px;outline:none;transition:border-color 0.14s;}
+.mem-inp:focus{border-color:var(--accent);}
+.mem-add-btn{padding:8px 14px;border-radius:9px;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;transition:opacity 0.12s;}
+.mem-add-btn:hover{opacity:0.85;}
 
 /* ── Body ── */
-.body { flex: 1; overflow: hidden; position: relative; }
-.empty-wrap { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px 24px; gap: 20px; overflow-y: auto; }
-.empty-wrap::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -62%); width: 600px; height: 400px; background: radial-gradient(ellipse at center, var(--accent-glow) 0%, transparent 70%); pointer-events: none; z-index: 0; }
-.welcome-hero { position: relative; z-index: 1; text-align: center; }
-.welcome-hi { font-family: var(--font); font-size: 15px; font-weight: 500; color: var(--accent); letter-spacing: .02em; margin-bottom: 10px; }
-.welcome-heading { font-family: var(--font-display); font-size: clamp(30px, 5vw, 52px); font-weight: 500; line-height: 1.15; letter-spacing: -.02em; color: var(--text); max-width: 560px; }
-.empty-inp-box { position: relative; z-index: 1; width: 100%; max-width: 640px; display: flex; align-items: flex-end; gap: 6px; background: var(--surface); border: 1.5px solid var(--border); border-radius: 22px; padding: 10px 10px 10px 14px; box-shadow: var(--shadow-lg); transition: border-color .18s, box-shadow .18s; }
-.empty-inp-box:focus-within { border-color: rgba(176,125,90,.5); box-shadow: var(--shadow-lg), 0 0 0 4px var(--accent-light); }
-.empty-hint { position: relative; z-index: 1; font-size: 11px; color: var(--text-3); letter-spacing: .01em; }
-.chips-grid { position: relative; z-index: 1; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; max-width: 640px; width: 100%; }
-.chip { display: flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 100px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); font-family: var(--font); font-size: 13.5px; font-weight: 500; cursor: pointer; transition: all .18s; box-shadow: var(--shadow-sm); -webkit-tap-highlight-color: transparent; }
-.chip:hover { border-color: var(--accent); background: var(--accent-light); color: var(--accent); box-shadow: var(--shadow), 0 0 0 3px var(--accent-light); transform: translateY(-1px); }
-.chip:active { transform: translateY(0); }
-.chip-ico { font-size: 16px; line-height: 1; }
-.chip-label { white-space: nowrap; }
+.body{flex:1;overflow:hidden;position:relative;}
+
+/* ── Empty / Welcome ── */
+.empty-wrap{height:100%;display:flex;align-items:center;justify-content:center;overflow-y:auto;}
+.empty-root{display:flex;flex-direction:column;align-items:center;gap:28px;padding:40px 24px 80px;width:100%;max-width:680px;position:relative;}
+
+.welcome-block{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;}
+.welcome-icon{position:relative;width:48px;height:48px;display:flex;align-items:center;justify-content:center;}
+.wi-core{width:14px;height:14px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 0 20px var(--ag);}
+.wi-ring{position:absolute;inset:-8px;border-radius:50%;border:1.5px solid rgba(160,114,74,0.2);}
+.welcome-h{font-family:var(--serif);font-size:clamp(34px,5.5vw,58px);font-weight:400;color:var(--text);letter-spacing:-0.03em;line-height:1.1;}
+.welcome-sub{font-size:16px;color:var(--text2);font-weight:300;letter-spacing:-0.01em;}
+
+.empty-input-wrap{width:100%;max-width:640px;}
+.empty-hint{text-align:center;font-size:11px;color:var(--text3);margin-top:8px;letter-spacing:0.01em;}
+
+/* Chips */
+.chips-wrap{display:flex;flex-wrap:wrap;justify-content:center;gap:9px;max-width:560px;}
+.chip{display:flex;align-items:center;gap:8px;padding:9px 17px;border-radius:100px;border:1px solid var(--border2);background:var(--surface);color:var(--text);font-family:var(--font);font-size:13px;font-weight:400;cursor:pointer;transition:all 0.18s;box-shadow:var(--s1);position:relative;overflow:hidden;}
+.chip:hover{border-color:var(--accent);background:var(--al);color:var(--accent);}
+.chip-glyph{font-size:14px;line-height:1;opacity:0.7;}
+.chip-label{white-space:nowrap;}
+.chip-shine{position:absolute;top:0;left:0;width:40px;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.6),transparent);transform:skewX(-15deg);pointer-events:none;}
+
+/* ── Input ── */
+.inp-shell{background:var(--surface);border:1.5px solid var(--border2);border-radius:20px;padding:11px 11px 11px 14px;box-shadow:var(--s2);position:relative;transition:box-shadow 0.2s;}
+.inp-focused{box-shadow:var(--s2),0 0 0 4px var(--al);}
+.inp-border-glow{position:absolute;inset:-1.5px;border-radius:20px;border:1.5px solid var(--border2);pointer-events:none;transition:border-color 0.2s;}
+.inp-border-active{border-color:rgba(160,114,74,0.4);}
+.attachments-row{display:flex;gap:8px;margin-bottom:8px;padding:0 2px;}
+.att-chip{display:flex;align-items:center;border-radius:10px;border:1px solid var(--border);background:var(--bg2);overflow:hidden;position:relative;}
+.att-img{height:52px;width:72px;}
+.att-img img{width:100%;height:100%;object-fit:cover;}
+.att-doc{padding:7px 10px;gap:7px;}
+.att-doc-name{font-size:12px;font-weight:500;color:var(--text);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.att-rm{position:absolute;top:-5px;right:-5px;width:17px;height:17px;border-radius:50%;background:var(--text);color:var(--surface);border:2px solid var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;}
+.inp-row{display:flex;align-items:flex-end;gap:8px;}
+.inp-tools{display:flex;align-items:center;gap:2px;padding-bottom:2px;}
+.inp-tool{width:30px;height:30px;border-radius:8px;border:none;background:transparent;color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.13s;}
+.inp-tool:hover{background:var(--bg2);color:var(--text2);}
+.inp-tool:disabled{opacity:0.3;cursor:not-allowed;}
+.inp-ta{flex:1;border:none;outline:none;background:transparent;font-family:var(--font);font-size:14.5px;color:var(--text);line-height:1.6;resize:none;min-height:24px;max-height:160px;overflow-y:auto;padding:2px 0;letter-spacing:-0.01em;}
+.inp-ta::placeholder{color:var(--text3);}
+.inp-ta::-webkit-scrollbar{width:0;}
+.inp-right{display:flex;align-items:center;gap:6px;padding-bottom:2px;}
+.mic-btn{width:32px;height:32px;border-radius:10px;border:none;background:transparent;color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.14s;}
+.mic-btn:hover{background:var(--bg2);color:var(--text);}
+.mic-live{color:var(--accent)!important;background:var(--al)!important;}
+.mic-wave{width:16px;height:16px;background:var(--accent);border-radius:3px;}
+.send-btn{width:34px;height:34px;border-radius:11px;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 2px 12px var(--ag);transition:box-shadow 0.14s;}
+.send-btn:hover:not(:disabled){box-shadow:0 4px 20px var(--ag);}
+.send-btn:disabled{cursor:not-allowed;}
 
 /* ── Chat ── */
-.chat-scroll { height: 100%; overflow-y: auto; overscroll-behavior: contain; }
-.chat-scroll::-webkit-scrollbar { width: 4px; }
-.chat-scroll::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
-.chat-inner { max-width: 740px; margin: 0 auto; padding: 24px 20px 12px; display: flex; flex-direction: column; gap: 6px; }
-.bubble-row { display: flex; gap: 10px; padding: 5px 0; align-items: flex-start; }
-.u-row { flex-direction: row-reverse; }
-.pinned .bubble { outline: 2px solid var(--accent) !important; outline-offset: 2px; }
-.avatar { width: 30px; height: 30px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; margin-top: 2px; letter-spacing: .01em; }
-.z-av { background: var(--accent-light); color: var(--accent); border: 1px solid rgba(176,125,90,.2); }
-.u-av { background: var(--user-bg); color: var(--user-fg); }
-.bwrap { display: flex; flex-direction: column; gap: 4px; max-width: min(76%, 560px); }
-.u-wrap { align-items: flex-end; }
-.pin-tag { font-size: 10.5px; color: var(--accent); font-weight: 600; padding-left: 2px; }
-.bubble { padding: 4px 0; font-size: 15.5px; line-height: 1.55; word-break: break-word; position: relative; transition: all .16s; background: transparent !important; border: none !important; box-shadow: none !important; }
-.z-bubble { color: var(--text); }
-.u-bubble { color: var(--accent); font-weight: 500; text-align: right; }
-.bubble-img-container { position: relative; width: 100%; max-width: 320px; border-radius: 12px; overflow: hidden; margin-bottom: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.12); border: 1px solid var(--border); }
-.b-img { display: block; width: 100%; height: auto; transition: transform .3s; }
-.bubble-img-container:hover .b-img { transform: scale(1.02); }
-.img-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.22); display: flex; align-items: center; justify-content: center; gap: 12px; opacity: 0; transition: opacity .2s; backdrop-filter: blur(3px); }
-.bubble-img-container:hover .img-overlay { opacity: 1; }
-.img-btn { width: 38px; height: 38px; border-radius: 50%; border: none; background: rgba(255,255,255,.92); color: #1e1b17; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,.15); transition: transform .14s; }
-.img-btn:hover { transform: scale(1.1); }
-.b-doc-card { display: flex; align-items: center; gap: 9px; padding: 10px 14px; background: rgba(0,0,0,.04); border-radius: 10px; text-decoration: none; color: inherit; margin-bottom: 6px; border: 1px solid var(--border); transition: background .14s; }
-.b-doc-card:hover { background: rgba(0,0,0,.07); }
-.b-doc-ico { opacity: .6; display: flex; align-items: center; }
-.b-doc-name { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
-.z-ic { font-family: var(--mono); font-size: 12.5px; background: rgba(0,0,0,.06); border-radius: 4px; padding: 1px 5px; }
-.bmeta { display: flex; align-items: center; gap: 6px; padding: 0 2px; margin-top: 4px; transition: opacity .15s; }
-.btime { font-size: 10.5px; color: var(--text-3); }
-.bact { width: 22px; height: 22px; border-radius: 6px; border: none; background: transparent; color: var(--text-3); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; transition: all .12s; }
-.bact:hover { background: var(--border); color: var(--text); }
-.bact-on { color: var(--accent); }
-.b-status { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 7px; opacity: 0.85; letter-spacing: 0.03em; text-transform: uppercase; }
-.b-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.5s infinite; }
-@keyframes status-pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.4); opacity: 0.5; } 100% { transform: scale(1); opacity: 1; } }
-.typing { display: flex; gap: 5px; align-items: center; padding: 4px 0; height: 22px; background: transparent; }
-.typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); animation: bounce .95s ease-in-out infinite; }
-.typing span:nth-child(2) { animation-delay: .16s; }
-.typing span:nth-child(3) { animation-delay: .32s; }
-@keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+.chat-scroll{height:100%;overflow-y:auto;overscroll-behavior:contain;}
+.chat-scroll::-webkit-scrollbar{width:4px;}
+.chat-scroll::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
+.chat-inner{max-width:740px;margin:0 auto;padding:28px 20px 16px;display:flex;flex-direction:column;gap:4px;}
+
+/* Bubbles */
+.bubble-row{display:flex;gap:10px;padding:4px 0;align-items:flex-start;}
+.u-row{flex-direction:row-reverse;}
+.pinned .bubble{outline:1.5px solid var(--accent);outline-offset:3px;border-radius:16px;}
+.z-av{width:28px;height:28px;border-radius:9px;background:var(--al);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;margin-top:2px;border:1px solid rgba(160,114,74,0.18);position:relative;}
+.av-pulse{position:absolute;inset:-3px;border-radius:12px;border:2px solid var(--accent);animation:av-pulse 1.2s ease-in-out infinite;}
+@keyframes av-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(1.1);}}
+.bwrap{display:flex;flex-direction:column;gap:3px;max-width:min(78%,580px);}
+.u-wrap{align-items:flex-end;}
+.pin-tag{font-size:10px;color:var(--accent);font-weight:500;padding-left:2px;}
+.bubble{padding:3px 0;font-size:15px;line-height:1.65;word-break:break-word;position:relative;}
+.u-bubble{color:var(--accent);}
+.u-text{font-weight:400;letter-spacing:-0.01em;}
+.z-bubble{color:var(--text);}
+
+/* Image in bubble */
+.bubble-img-container{position:relative;max-width:300px;border-radius:14px;overflow:hidden;margin-bottom:8px;box-shadow:var(--s3);border:1px solid var(--border);}
+.b-img{display:block;width:100%;height:auto;}
+.img-overlay{position:absolute;inset:0;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;gap:10px;opacity:0;transition:opacity 0.2s;backdrop-filter:blur(2px);}
+.bubble-img-container:hover .img-overlay{opacity:1;}
+.img-btn{width:36px;height:36px;border-radius:50%;border:none;background:rgba(255,255,255,0.9);color:#1a1a1a;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 0.14s;}
+.img-btn:hover{transform:scale(1.1);}
+
+/* Doc card */
+.b-doc-card{display:flex;align-items:center;gap:8px;padding:9px 13px;background:rgba(0,0,0,0.04);border-radius:10px;text-decoration:none;color:inherit;margin-bottom:6px;border:1px solid var(--border);transition:background 0.13s;font-size:13px;font-weight:500;}
+.b-doc-card:hover{background:rgba(0,0,0,0.07);}
+
+/* Status */
+.b-status{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;color:var(--accent);margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;}
+.b-status-ring{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--accent);animation:ring-spin 1s linear infinite;}
+@keyframes ring-spin{to{transform:rotate(360deg);box-shadow:0 0 0 3px var(--al);}}
+
+/* Typing */
+.typing{display:flex;gap:4px;align-items:center;height:20px;}
+.typing span{width:5px;height:5px;border-radius:50%;background:var(--text3);}
+
+/* Bubble meta */
+.bmeta{display:flex;align-items:center;gap:6px;padding:2px 2px 0;margin-top:2px;}
+.btime{font-size:10px;color:var(--text3);}
+.bacts{display:flex;align-items:center;gap:3px;}
+.bact{width:20px;height:20px;border-radius:6px;border:none;background:transparent;color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:all 0.11s;}
+.bact:hover{background:var(--border2);color:var(--text);}
+.bact-on{color:var(--accent)!important;}
+
+/* ── Markdown ── */
+.z-md{line-height:1.68;}
+.z-h2{font-family:var(--serif);font-size:19px;font-weight:400;color:var(--text);margin:16px 0 8px;letter-spacing:-0.02em;}
+.z-h3{font-size:14.5px;font-weight:600;color:var(--text);margin:12px 0 5px;}
+.z-bq{border-left:2px solid var(--accent);padding:8px 14px;margin:10px 0;font-style:italic;color:var(--text2);font-family:var(--serif);}
+.z-ul{padding-left:16px;margin:6px 0;display:flex;flex-direction:column;gap:3px;}
+.z-ul li{font-size:15px;line-height:1.6;color:var(--text);}
+.z-ic{font-family:var(--mono);font-size:12.5px;background:rgba(0,0,0,0.06);border-radius:4px;padding:1px 5px;color:var(--accent);}
+
+/* Code blocks */
+.z-code-block{margin:14px 0;background:#0c0c0c;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.07);box-shadow:0 8px 32px rgba(0,0,0,0.36);}
+.z-code-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);}
+.z-code-dots{display:flex;gap:6px;}
+.z-code-dots span{width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,0.12);}
+.z-code-lang{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(255,255,255,0.3);font-weight:500;}
+.z-code-actions{display:flex;gap:6px;}
+.z-code-btn{display:flex;align-items:center;gap:5px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:rgba(255,255,255,0.6);font-size:11px;font-weight:500;padding:4px 9px;cursor:pointer;transition:all 0.13s;font-family:var(--font);}
+.z-code-btn:hover{background:rgba(255,255,255,0.12);color:#fff;}
+.z-btn-ok{background:#1a3a1a!important;color:#4caf50!important;border-color:#4caf50!important;}
+.z-pre{padding:16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;color:#e0ddd8;line-height:1.6;background:transparent;}
+.z-code-inner{font-family:inherit;}
 
 /* ── Footer ── */
-.foot { flex-shrink: 0; padding: 10px 20px 14px; background: rgba(247,244,239,.9); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-top: 1px solid var(--border); }
-.img-pre-wrap { max-width: 700px; margin: 0 auto 8px; }
-.img-pre { position: relative; display: inline-block; }
-.img-pre img { height: 72px; max-width: 110px; border-radius: 10px; object-fit: cover; border: 1px solid var(--border); }
-.doc-pre { position: relative; display: inline-flex; align-items: center; padding: 11px 18px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--bg2); font-size: 13px; color: var(--text); }
-.doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; font-weight: 500; }
-.img-rm { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; border-radius: 50%; background: var(--text); color: var(--bg); border: 2px solid var(--bg); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
-.inp-box { max-width: 700px; margin: 0 auto; display: flex; align-items: flex-end; gap: 6px; background: var(--surface); border: 1.5px solid var(--border); border-radius: 18px; padding: 9px 9px 9px 12px; box-shadow: var(--shadow-sm); transition: border-color .18s, box-shadow .18s; }
-.inp-box:focus-within { border-color: rgba(176,125,90,.4); box-shadow: var(--shadow), 0 0 0 3px var(--accent-light); }
-.inp-ta { flex: 1; border: none; outline: none; background: transparent; font-family: var(--font); font-size: 14.5px; color: var(--text); line-height: 1.55; resize: none; min-height: 24px; max-height: 150px; overflow-y: auto; padding: 1px 0; }
-.inp-ta::placeholder { color: var(--text-3); }
-.inp-ta::-webkit-scrollbar { width: 0; }
-.inp-ico { width: 36px; height: 36px; border-radius: 11px; border: none; background: transparent; color: var(--text-2); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; align-self: flex-end; transition: all .14s; -webkit-tap-highlight-color: transparent; }
-.inp-ico:hover { background: var(--bg2); color: var(--text); }
-.inp-ico:disabled { opacity: .3; cursor: not-allowed; }
-.mic-live { color: #c0392b; background: rgba(192,57,43,.1); animation: mic-pulse 1.1s ease-in-out infinite; }
-@keyframes mic-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(192,57,43,.25); } 50% { box-shadow: 0 0 0 8px rgba(192,57,43,0); } }
-.inp-send { width: 36px; height: 36px; border-radius: 11px; border: none; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; align-self: flex-end; transition: opacity .14s, transform .1s, box-shadow .14s; touch-action: manipulation; -webkit-tap-highlight-color: transparent; box-shadow: 0 2px 10px var(--accent-glow); }
-.inp-send:hover:not(:disabled) { opacity: .9; transform: scale(1.05); box-shadow: 0 4px 16px var(--accent-glow); }
-.inp-send:active:not(:disabled) { transform: scale(.93); }
-.inp-send:disabled { opacity: .2; cursor: not-allowed; box-shadow: none; }
-.foot-hint { text-align: center; font-size: 11px; color: var(--text-3); margin-top: 8px; max-width: 700px; margin-left: auto; margin-right: auto; letter-spacing: .01em; }
+.foot{flex-shrink:0;background:rgba(248,245,240,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--border);padding:10px 20px 16px;}
+.foot-inner{max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:6px;}
+.foot-hint{text-align:center;font-size:10.5px;color:var(--text3);letter-spacing:0.01em;}
 
-/* ── Voice Mode ── */
-.voice-wrap { height: 100%; display: flex; align-items: center; justify-content: center; }
-.voice-shell { display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 24px 20px; width: 100%; max-width: 440px; }
-.orb-area { position: relative; width: 130px; height: 130px; display: flex; align-items: center; justify-content: center; }
-.orb-ring { position: absolute; inset: 0; border-radius: 50%; background: var(--accent-glow); }
-.orb { position: relative; z-index: 2; width: 118px; height: 118px; border-radius: 50%; border: 2px solid var(--border-2); background: var(--surface); color: var(--text-2); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .2s; -webkit-tap-highlight-color: transparent; box-shadow: var(--shadow); }
-.orb:disabled { opacity: .5; cursor: not-allowed; }
-.orb-live { border-color: var(--accent); background: var(--accent-light); color: var(--accent); box-shadow: var(--shadow), 0 0 30px var(--accent-glow); }
-.orb-spin { width: 32px; height: 32px; border-radius: 50%; border: 2.5px solid var(--border-2); border-top-color: var(--accent); }
-.orb-label { font-size: 13.5px; color: var(--text-2); letter-spacing: .02em; }
-.voice-cards { display: flex; flex-direction: column; gap: 10px; width: 100%; }
-.vcard { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; }
-.vc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
-.vc-who { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); margin-bottom: 7px; }
-.zvc-who { color: var(--accent); margin-bottom: 0; }
-.vc-text { font-size: 15.5px; color: var(--text); line-height: 1.55; }
-.err-card { border-color: rgba(192,57,43,.3); }
-.err-card .vc-text { color: #c0392b; }
-
-/* ── Code Blocks ── */
-.z-md { line-height: 1.6; }
-.z-code-block { margin: 16px 0; background: #0d0d0d; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
-.z-code-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(255,255,255,0.04); border-bottom: 1px solid rgba(255,255,255,0.06); }
-.z-code-dots { display: flex; gap: 6px; }
-.z-code-dots span { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,0.15); }
-.z-code-lang { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(255,255,255,0.4); font-weight: 600; }
-.z-code-actions { display: flex; gap: 8px; }
-.z-code-btn { display: flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: rgba(255,255,255,0.7); font-size: 11px; font-weight: 600; padding: 4px 10px; cursor: pointer; transition: all 0.14s; font-family: var(--font); }
-.z-code-btn:hover { background: rgba(255,255,255,0.15); color: #fff; }
-.z-btn-success { background: #1e3a1e !important; color: #4caf50 !important; border-color: #4caf50 !important; }
-.z-btn-active { background: rgba(176,125,90,0.25) !important; color: var(--accent-2) !important; border-color: rgba(176,125,90,0.4) !important; }
-.z-code { padding: 16px; overflow-x: auto; font-family: var(--mono); font-size: 13px; color: #e6e6e6; line-height: 1.5; background: transparent; }
-.z-code code { font-family: inherit; }
+/* ── Voice ── */
+.voice-wrap{height:100%;display:flex;align-items:center;justify-content:center;}
+.voice-shell{display:flex;flex-direction:column;align-items:center;gap:22px;padding:24px 20px;width:100%;max-width:420px;}
+.orb-stage{position:relative;width:120px;height:120px;display:flex;align-items:center;justify-content:center;}
+.orb-ripple{position:absolute;inset:0;border-radius:50%;background:var(--ag);}
+.orb{position:relative;z-index:2;width:110px;height:110px;border-radius:50%;border:1.5px solid var(--border2);background:var(--surface);color:var(--text2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.22s;box-shadow:var(--s2);}
+.orb:disabled{opacity:0.5;cursor:not-allowed;}
+.orb-live{border-color:var(--accent);background:var(--al);color:var(--accent);box-shadow:var(--s2),0 0 36px var(--ag);}
+.orb-spinner{width:28px;height:28px;border-radius:50%;border:2.5px solid var(--border2);border-top-color:var(--accent);}
+.orb-bars{display:flex;gap:3px;align-items:center;}
+.orb-bars span{display:block;width:3px;height:18px;background:var(--accent);border-radius:2px;}
+.orb-label{font-size:13px;color:var(--text2);letter-spacing:0.03em;}
+.voice-cards{display:flex;flex-direction:column;gap:10px;width:100%;}
+.vcard{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:14px 15px;}
+.you-vcard .vc-text{font-style:italic;color:var(--text2);}
+.z-vcard{border-color:rgba(160,114,74,0.2);}
+.err-vcard{border-color:rgba(192,57,43,0.3);}
+.err-vcard .vc-text{color:#c0392b;}
+.vc-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;}
+.vc-label{display:block;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--text3);margin-bottom:7px;}
+.vc-z{color:var(--accent);margin-bottom:0;}
+.vc-text{font-size:15px;color:var(--text);line-height:1.6;}
 
 /* ── Preview Modal ── */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; }
-.preview-modal { width: 100%; max-width: 1000px; height: 85vh; background: #fff; border-radius: 24px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 30px 60px rgba(0,0,0,0.4); }
-.preview-hd { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: #f8f9fa; border-bottom: 1px solid #eee; }
-.preview-title { font-weight: 700; color: #1a1a1a; display: flex; align-items: center; gap: 10px; font-size: 14px; }
-.preview-close { width: 32px; height: 32px; border-radius: 50%; border: none; background: #eee; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s; }
-.preview-close:hover { background: #e0e0e0; }
-.preview-frame { flex: 1; border: none; background: #fff; width: 100%; }
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(6px);z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;}
+.preview-modal{width:100%;max-width:1040px;height:88vh;background:#fff;border-radius:20px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 40px 80px rgba(0,0,0,0.4);}
+.preview-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:#f8f8f8;border-bottom:1px solid #eee;}
+.preview-title{display:flex;align-items:center;gap:8px;font-weight:600;color:#1a1a1a;font-size:13px;}
+.preview-close{width:28px;height:28px;border-radius:50%;border:none;background:#e8e8e8;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background 0.14s;}
+.preview-close:hover{background:#d8d8d8;}
+.preview-frame{flex:1;border:none;width:100%;}
 
 /* ── Mobile ── */
-@media (max-width: 500px) {
-  .chat-inner { padding: 14px 12px 8px; }
-  .bubble { font-size: 14.5px; }
-  .welcome-heading { font-size: 28px; }
-  .welcome-hi { font-size: 14px; }
-  .foot-hint { display: none; }
-  .panel-wrap { right: 8px; left: 8px; }
-  .panel, .prof-drop { width: 100%; }
-  .chips-grid { gap: 8px; }
-  .chip { padding: 9px 15px; font-size: 13px; }
-  .orb { width: 100px; height: 100px; }
-  .orb-area { width: 110px; height: 110px; }
-  .empty-wrap { gap: 16px; padding: 24px 16px; }
-  .preview-modal { height: 95vh; border-radius: 16px; }
-  .modal-overlay { padding: 10px; }
+@media (max-width:500px){
+  .chat-inner{padding:16px 12px 10px;}
+  .bubble{font-size:14.5px;}
+  .welcome-h{font-size:30px;}
+  .welcome-sub{font-size:14px;}
+  .foot-hint{display:none;}
+  .drop{width:calc(100vw - 24px);}
+  .drop-panel{right:-4px;}
+  .chips-wrap{gap:7px;}
+  .chip{padding:8px 13px;font-size:12.5px;}
+  .hdr-c{display:none;}
+  .preview-modal{height:96vh;border-radius:14px;}
+  .modal-overlay{padding:10px;}
 }
 
-/* ══ DARK MODE ═══════════════════════════════════════════════════════════════ */
-.dark {
-  --bg:           #0f0e0c;
-  --bg2:          #171411;
-  --surface:      #1c1916;
-  --surface-2:    #211e1a;
-  --border:       #2c2720;
-  --border-2:     #38322a;
-  --text:         #ede5d8;
-  --text-2:       #8a7f73;
-  --text-3:       #4e4740;
-  --accent:       #c9906a;
-  --accent-2:     #dea880;
-  --accent-light: rgba(201,144,106,.10);
-  --accent-glow:  rgba(201,144,106,.22);
-  --shadow-sm:    0 1px 6px rgba(0,0,0,.3);
-  --shadow:       0 2px 16px rgba(0,0,0,.4);
-  --shadow-lg:    0 8px 40px rgba(0,0,0,.5);
-  --shadow-xl:    0 20px 60px rgba(0,0,0,.6);
+/* ══ DARK MODE ═════════════════════════════════════════════════════ */
+.dark{
+  --bg:#0e0c08;
+  --bg2:#161310;
+  --surface:#1a1714;
+  --surface2:#1e1b17;
+  --border:rgba(255,255,255,0.07);
+  --border2:rgba(255,255,255,0.11);
+  --text:#ede5d5;
+  --text2:#7a7468;
+  --text3:#45413c;
+  --accent:#c4956e;
+  --accent2:#dba880;
+  --accent3:#f0c898;
+  --al:rgba(196,149,110,0.10);
+  --ag:rgba(196,149,110,0.20);
+  --s1:0 1px 4px rgba(0,0,0,0.3);
+  --s2:0 4px 20px rgba(0,0,0,0.4);
+  --s3:0 12px 48px rgba(0,0,0,0.5);
+  --s4:0 24px 72px rgba(0,0,0,0.6);
 }
-.dark body, .dark .root { background: var(--bg); color: var(--text); }
-.dark .hdr { background: rgba(15,14,12,.85); border-bottom-color: var(--border); }
-.dark .sb { background: var(--surface); border-right-color: var(--border); }
-.dark .sb-user { background: var(--bg2); border-top-color: var(--border); }
-.dark .inp-box { background: var(--surface); border-color: var(--border); }
-.dark .empty-inp-box { background: var(--surface); border-color: var(--border); }
-.dark .foot { background: rgba(15,14,12,.88); border-top-color: var(--border); }
-.dark .panel { background: var(--surface); border-color: var(--border); }
-.dark .prof-drop { background: var(--surface); border-color: var(--border); }
-.dark .mode-tog { background: var(--bg2); border-color: var(--border); }
-.dark .mode-on { background: var(--surface-2); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
-.dark .chip { background: var(--surface); border-color: var(--border); }
-.dark .chip:hover { background: var(--accent-light); border-color: var(--accent); }
-.dark .vcard { background: var(--surface); border-color: var(--border); }
-.dark .orb { background: var(--surface); border-color: var(--border); }
-.dark .z-ic { background: rgba(255,255,255,.06); }
-.dark .mem-item { background: var(--bg2); border-color: var(--border); }
-.dark .z-bubble, .dark .u-bubble { background: transparent !important; border: none !important; box-shadow: none !important; }
-.dark .sb-new:hover { background: var(--accent-light); border-color: var(--accent); }
-.dark .b-doc-card { background: rgba(255,255,255,.04); border-color: var(--border); }
-.dark .b-doc-card:hover { background: rgba(255,255,255,.07); }
-.dark .img-btn { background: rgba(28,25,22,.92); color: var(--text); }
-.dark .welcome-heading { color: var(--text); }
-.dark .hdr-avatar { border-color: var(--border); }
-.dark .sb-export { border-color: var(--border-2); }
-`;
+.dark body,.dark .root{background:var(--bg);color:var(--text);}
+.dark .hdr{background:rgba(14,12,8,0.88);border-bottom-color:var(--border);}
+.dark .sb{background:var(--surface);border-right-color:var(--border);}
+.dark .sb-foot{background:var(--surface2);}
+.dark .inp-shell{background:var(--surface);border-color:var(--border2);}
+.dark .drop{background:var(--surface);}
+.dark .foot{background:rgba(14,12,8,0.9);border-top-color:var(--border);}
+.dark .mode-seg{background:var(--bg2);border-color:var(--border);}
+.dark .mode-on{background:var(--surface2);}
+.dark .chip{background:var(--surface);border-color:var(--border2);}
+.dark .chip:hover{background:var(--al);border-color:var(--accent);}
+.dark .vcard{background:var(--surface);}
+.dark .orb{background:var(--surface);}
+.dark .z-ic{background:rgba(255,255,255,0.06);}
+.dark .mem-item{background:var(--bg2);}
+.dark .mem-inp{background:var(--bg2);}
+.dark .b-doc-card{background:rgba(255,255,255,0.04);}
+.dark .hdr-av{border-color:var(--border2);}
+.dark .preview-modal{background:#0f0f0f;}
+.dark .preview-hd{background:#1a1a1a;border-bottom-color:#2a2a2a;}
+.dark .preview-title{color:#eee;}
+.dark .preview-close{background:#2a2a2a;}
+.dark .preview-close:hover{background:#3a3a3a;}
+.dark .cursor-glow{background:radial-gradient(circle,rgba(196,149,110,0.06) 0%,transparent 65%);}
+`;  
